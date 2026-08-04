@@ -1,0 +1,27 @@
+{
+	"schemaVersion": 1,
+	"id": "farclimb",
+	"version": "${version}",
+	"name": "FarClimb",
+	"description": "A focused mountaineering mod built around deliberate two-axe climbing.",
+	"authors": [
+		"cjeme26"
+	],
+	"license": "CC0-1.0",
+	"icon": "assets/farclimb/icon.png",
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"com.cjeme26.farclimb.FarClimb"
+		],
+		"client": [
+			"com.cjeme26.farclimb.client.FarClimbClient"
+		]
+	},
+	"depends": {
+		"fabricloader": ">=0.19.3",
+		"minecraft": "~1.21.4",
+		"java": ">=21",
+		"fabric-api": "*"
+	}
+}
