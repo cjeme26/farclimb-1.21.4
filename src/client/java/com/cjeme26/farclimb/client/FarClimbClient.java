@@ -1,5 +1,6 @@
 package com.cjeme26.farclimb.client;
 
+import com.cjeme26.farclimb.client.render.AnchoredAxeRenderer;
 import com.cjeme26.farclimb.item.ModItems;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -8,6 +9,7 @@ import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
@@ -18,6 +20,8 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.RotationAxis;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.Random;
@@ -50,6 +54,17 @@ public class FarClimbClient implements ClientModInitializer {
 
     private static final double WALL_FACE_EPSILON = 0.01D;
 
+    // Newly planted axes are constrained to a believable reach window around
+    // the corresponding shoulder. The player can still aim within that window,
+    // but a high crosshair hit can no longer place a world-anchored axe far
+    // above the body after a drop or reattachment.
+    private static final double AXE_CONTACT_SHOULDER_HEIGHT = 1.45D;
+    private static final double AXE_CONTACT_SIDE_BIAS = 0.23D;
+    private static final double AXE_CONTACT_SIDE_REACH = 0.24D;
+    private static final double AXE_CONTACT_DOWN_REACH = 0.22D;
+    private static final double AXE_CONTACT_UP_REACH = 0.42D;
+    private static final double AXE_CONTACT_FACE_INSET = 0.18D;
+
     // Stationary hanging uses a slow, broad pendulum motion. Active climbing
     // uses a separate alternating pulse tied to each stride.
     private static final float STATIONARY_SWAY_DEGREES = 1.55F;
@@ -77,6 +92,38 @@ public class FarClimbClient implements ClientModInitializer {
     private static final double ONE_AXE_CAMERA_VERTICAL_FOLLOW = 0.65D;
     private static final double CAMERA_POSITION_RESPONSE = 0.24D;
     private static final int TWO_AXE_STABILIZE_DURATION_TICKS = 10;
+
+    // While axes are planted, the wall contact constrains how far the climber
+    // can turn. Two axes keep the torso square to the wall and allow mostly
+    // head movement. One axe allows a wider look range and lets the torso
+    // follow part of that turn around the supporting arm.
+    private static final float TWO_AXE_LOOK_YAW_LIMIT_DEGREES = 48.0F;
+    private static final float ONE_AXE_LOOK_YAW_LIMIT_DEGREES = 88.0F;
+    private static final float ONE_AXE_BODY_YAW_FOLLOW = 0.45F;
+    private static final double MOUSE_LOOK_DELTA_TO_DEGREES = 0.15D;
+    private static final float OUT_OF_RANGE_LOOK_RETURN_DEGREES_PER_TICK = 6.0F;
+    private static final float BODY_YAW_RESPONSE = 0.28F;
+
+    // First-person axe presentation. Each successful click now runs one custom
+    // strike timeline from the normal held pose into the planted pose. Vanilla's
+    // separate attack/use swing is suppressed while climbing axes own the clicks.
+    private static final int AXE_STRIKE_DURATION_TICKS = 8;
+    private static final double AXE_IMPACT_PROGRESS = 0.76D;
+    private static final double AXE_BASE_INWARD_SHIFT = 0.25D;
+    private static final double AXE_BASE_RAISE = 0.54D;
+    private static final double AXE_BASE_FORWARD_SHIFT = -0.12D;
+    private static final double AXE_CONTACT_HORIZONTAL_FOLLOW = 0.30D;
+    private static final double AXE_CONTACT_VERTICAL_FOLLOW = 0.18D;
+    private static final double AXE_STRIKE_ARC_RAISE = 0.13D;
+    private static final double AXE_STRIKE_FORWARD_PUNCH = 0.10D;
+    private static final double AXE_IMPACT_RECOIL = 0.035D;
+    private static final double AXE_STRIDE_LIFT = 0.10D;
+    private static final double AXE_STRIDE_RETRACT = 0.07D;
+    private static final float AXE_PLANTED_X_ROTATION = -35.0F;
+    private static final float AXE_PLANTED_Y_ROTATION = 8.0F;
+    private static final float AXE_PLANTED_Z_ROTATION = 10.0F;
+    private static final float AXE_STRIKE_EXTRA_X_ROTATION = -18.0F;
+    private static final float AXE_STRIKE_EXTRA_Z_ROTATION = 8.0F;
 
     private static final Random STRIDE_RANDOM = new Random();
 
@@ -134,9 +181,17 @@ public class FarClimbClient implements ClientModInitializer {
     private static Vec3d stabilizationTargetPosition;
     private static int stabilizationElapsedTicks = 0;
 
+    private static float previousMainAxeStrikeProgress = 0.0F;
+    private static float mainAxeStrikeProgress = 0.0F;
+    private static boolean mainAxeImpactPlayed = false;
+    private static float previousOffhandAxeStrikeProgress = 0.0F;
+    private static float offhandAxeStrikeProgress = 0.0F;
+    private static boolean offhandAxeImpactPlayed = false;
+
     @Override
     public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(FarClimbClient::tickClimbing);
+        AnchoredAxeRenderer.initialize();
 
         // Mouse buttons are mapped to the hands as they appear on screen:
         // left click controls the visible left-side axe and right click controls
@@ -175,6 +230,8 @@ public class FarClimbClient implements ClientModInitializer {
 
     private static void tickClimbing(MinecraftClient client) {
         tickClimbingLogic(client);
+        updateWallFacingRotation(client);
+        updateAxeStrikeAnimation(client);
         updateCameraSway(client);
     }
 
@@ -278,6 +335,149 @@ public class FarClimbClient implements ClientModInitializer {
         holdPlayerAtAttachment(client);
     }
 
+    /**
+     * Restricts the local player around the normal of the planted wall face.
+     * The camera/head may still look around inside the allowed arc, but the
+     * torso remains physically constrained by the attached axes.
+     */
+    private static void updateWallFacingRotation(MinecraftClient client) {
+        if (client.player == null
+                || !hasAnyAxeAttached()
+                || attachmentWallSide == null
+                || !attachmentWallSide.getAxis().isHorizontal()) {
+            return;
+        }
+
+        float wallFacingYaw = MathHelper.wrapDegrees(
+                getHorizontalDirectionYaw(attachmentWallSide.getOpposite())
+        );
+        float lookLimit = getCurrentLookYawLimit();
+        float currentOffset = MathHelper.wrapDegrees(
+                client.player.getYaw() - wallFacingYaw
+        );
+
+        // Input is normally clamped before Entity.changeLookDirection applies
+        // it. The only time the player can still be outside the range is when a
+        // second axe is planted and the allowed arc becomes narrower. Ease that
+        // transition back inside the new range instead of snapping in one tick.
+        float targetOffset = MathHelper.clamp(
+                currentOffset,
+                -lookLimit,
+                lookLimit
+        );
+        if (Math.abs(MathHelper.wrapDegrees(targetOffset - currentOffset)) > 0.001F) {
+            float easedOffset = approachAngleDegrees(
+                    currentOffset,
+                    targetOffset,
+                    OUT_OF_RANGE_LOOK_RETURN_DEGREES_PER_TICK
+            );
+            float easedYaw = MathHelper.wrapDegrees(wallFacingYaw + easedOffset);
+            client.player.setYaw(easedYaw);
+            client.player.setHeadYaw(easedYaw);
+            currentOffset = easedOffset;
+        } else {
+            // Keep the rendered head synchronized with the already-clamped
+            // camera yaw without changing the camera itself.
+            client.player.setHeadYaw(client.player.getYaw());
+        }
+
+        // With two axes, the torso remains square to the wall. With one axe it
+        // follows part of the head turn. Ease the body independently so the
+        // model does not jerk when the player reaches either look limit.
+        float bodyOffset = hasBothAxesAttached()
+                ? 0.0F
+                : currentOffset * ONE_AXE_BODY_YAW_FOLLOW;
+        float targetBodyYaw = MathHelper.wrapDegrees(wallFacingYaw + bodyOffset);
+        client.player.setBodyYaw(lerpAngleDegrees(
+                client.player.getBodyYaw(),
+                targetBodyYaw,
+                BODY_YAW_RESPONSE
+        ));
+    }
+
+    /**
+     * Limits horizontal mouse input before vanilla applies it. This prevents
+     * the old boundary jitter where the mouse rotated past the limit and the
+     * end-of-tick climbing code repeatedly snapped the camera back.
+     */
+    public static double clampClimbingLookDeltaX(Object entity, double cursorDeltaX) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null
+                || entity != client.player
+                || !hasAnyAxeAttached()
+                || attachmentWallSide == null
+                || !attachmentWallSide.getAxis().isHorizontal()) {
+            return cursorDeltaX;
+        }
+
+        float wallFacingYaw = MathHelper.wrapDegrees(
+                getHorizontalDirectionYaw(attachmentWallSide.getOpposite())
+        );
+        float currentOffset = MathHelper.wrapDegrees(
+                client.player.getYaw() - wallFacingYaw
+        );
+        float lookLimit = getCurrentLookYawLimit();
+        double requestedDegrees = cursorDeltaX * MOUSE_LOOK_DELTA_TO_DEGREES;
+
+        // If a newly tightened two-axe limit leaves the player temporarily
+        // outside the range, block only input that would move farther out. The
+        // tick update eases the view back toward the boundary.
+        if (currentOffset > lookLimit && requestedDegrees >= 0.0D) {
+            return 0.0D;
+        }
+        if (currentOffset < -lookLimit && requestedDegrees <= 0.0D) {
+            return 0.0D;
+        }
+        if (currentOffset > lookLimit || currentOffset < -lookLimit) {
+            return cursorDeltaX;
+        }
+
+        double targetOffset = currentOffset + requestedDegrees;
+        double clampedTargetOffset = MathHelper.clamp(
+                targetOffset,
+                -lookLimit,
+                lookLimit
+        );
+        return (clampedTargetOffset - currentOffset)
+                / MOUSE_LOOK_DELTA_TO_DEGREES;
+    }
+
+    private static float getCurrentLookYawLimit() {
+        return hasBothAxesAttached()
+                ? TWO_AXE_LOOK_YAW_LIMIT_DEGREES
+                : ONE_AXE_LOOK_YAW_LIMIT_DEGREES;
+    }
+
+    private static float approachAngleDegrees(float current, float target, float maximumStep) {
+        float difference = MathHelper.wrapDegrees(target - current);
+        if (difference > maximumStep) {
+            difference = maximumStep;
+        } else if (difference < -maximumStep) {
+            difference = -maximumStep;
+        }
+        return MathHelper.wrapDegrees(current + difference);
+    }
+
+    private static float lerpAngleDegrees(float current, float target, float response) {
+        float difference = MathHelper.wrapDegrees(target - current);
+        return MathHelper.wrapDegrees(current + difference * response);
+    }
+
+    /**
+     * Converts a horizontal block direction to Minecraft's yaw convention.
+     * Yarn 1.21.4 does not expose Direction.asRotation(), so FarClimb keeps
+     * the conversion explicit and mapping-independent.
+     */
+    private static float getHorizontalDirectionYaw(Direction direction) {
+        return switch (direction) {
+            case SOUTH -> 0.0F;
+            case WEST -> 90.0F;
+            case NORTH -> 180.0F;
+            case EAST -> -90.0F;
+            default -> 0.0F;
+        };
+    }
+
     private static void toggleAxe(MinecraftClient client, boolean mainHand) {
         if (mainHand ? mainAxeAttached : offhandAxeAttached) {
             releaseAxe(
@@ -323,14 +523,20 @@ public class FarClimbClient implements ClientModInitializer {
             attachmentWallSide = wallHit.getSide();
         }
 
+        Vec3d reachableContact = getReachLimitedAxeContact(
+                client,
+                wallHit,
+                mainHand
+        );
+
         if (mainHand) {
             mainAxeAttached = true;
-            mainAxeContactPoint = wallHit.getPos();
+            mainAxeContactPoint = reachableContact;
             mainAxeWallPos = wallHit.getBlockPos().toImmutable();
             mainAxeWallSide = wallHit.getSide();
         } else {
             offhandAxeAttached = true;
-            offhandAxeContactPoint = wallHit.getPos();
+            offhandAxeContactPoint = reachableContact;
             offhandAxeWallPos = wallHit.getBlockPos().toImmutable();
             offhandAxeWallSide = wallHit.getSide();
         }
@@ -346,14 +552,7 @@ public class FarClimbClient implements ClientModInitializer {
 
         previousClimbingState = 5;
         holdPlayerAtAttachment(client);
-        client.player.swingHand(mainHand ? Hand.MAIN_HAND : Hand.OFF_HAND);
-
-        client.player.playSoundToPlayer(
-                SoundEvents.BLOCK_ANVIL_PLACE,
-                SoundCategory.PLAYERS,
-                0.55F,
-                mainHand ? 1.42F : 1.52F
-        );
+        beginAxeStrike(mainHand);
 
         if (hasBothAxesAttached()) {
             client.player.sendMessage(
@@ -447,6 +646,493 @@ public class FarClimbClient implements ClientModInitializer {
             attachmentWallPos = null;
             attachmentWallSide = null;
         }
+    }
+
+    private static void beginAxeStrike(boolean mainHand) {
+        if (mainHand) {
+            previousMainAxeStrikeProgress = 0.0F;
+            mainAxeStrikeProgress = 0.0F;
+            mainAxeImpactPlayed = false;
+        } else {
+            previousOffhandAxeStrikeProgress = 0.0F;
+            offhandAxeStrikeProgress = 0.0F;
+            offhandAxeImpactPlayed = false;
+        }
+    }
+
+    private static void updateAxeStrikeAnimation(MinecraftClient client) {
+        previousMainAxeStrikeProgress = mainAxeStrikeProgress;
+        previousOffhandAxeStrikeProgress = offhandAxeStrikeProgress;
+
+        if (mainAxeAttached) {
+            mainAxeStrikeProgress = advanceStrikeProgress(mainAxeStrikeProgress);
+            if (!mainAxeImpactPlayed && mainAxeStrikeProgress >= AXE_IMPACT_PROGRESS) {
+                playAxeImpact(client, true);
+                mainAxeImpactPlayed = true;
+            }
+        } else {
+            mainAxeStrikeProgress = 0.0F;
+            mainAxeImpactPlayed = false;
+        }
+
+        if (offhandAxeAttached) {
+            offhandAxeStrikeProgress = advanceStrikeProgress(offhandAxeStrikeProgress);
+            if (!offhandAxeImpactPlayed && offhandAxeStrikeProgress >= AXE_IMPACT_PROGRESS) {
+                playAxeImpact(client, false);
+                offhandAxeImpactPlayed = true;
+            }
+        } else {
+            offhandAxeStrikeProgress = 0.0F;
+            offhandAxeImpactPlayed = false;
+        }
+    }
+
+    private static float advanceStrikeProgress(float current) {
+        return Math.min(1.0F, current + 1.0F / AXE_STRIKE_DURATION_TICKS);
+    }
+
+    private static void playAxeImpact(MinecraftClient client, boolean mainHand) {
+        if (client.player == null) {
+            return;
+        }
+
+        client.player.playSoundToPlayer(
+                SoundEvents.BLOCK_ANVIL_PLACE,
+                SoundCategory.PLAYERS,
+                0.55F,
+                mainHand ? 1.42F : 1.52F
+        );
+    }
+
+    /**
+     * Returns whether the supplied Minecraft hand currently has an axe planted.
+     */
+    public static boolean isAxeAttached(Hand hand) {
+        return hand == Hand.MAIN_HAND ? mainAxeAttached : offhandAxeAttached;
+    }
+
+    /**
+     * Rendering systems use this to stop drawing wall-owned axes as soon as a
+     * mantle begins. The gameplay attachment state remains alive until the
+     * committed mantle movement finishes.
+     */
+    public static boolean isMantling() {
+        return mantling;
+    }
+
+
+    /**
+     * Returns whether the local player model should use FarClimb's third-person
+     * climbing pose for this rendered entity.
+     */
+    public static boolean shouldApplyThirdPersonClimbingPose(int renderedEntityId) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        return client.player != null
+                && client.player.getId() == renderedEntityId
+                && hasAnyAxeAttached()
+                && !mantling;
+    }
+
+    /**
+     * Returns whether the axe visibly held on the requested screen/body side is
+     * currently planted. This respects Minecraft's configurable main arm.
+     */
+    public static boolean isVisibleSideAxeAttached(boolean leftSide) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) {
+            return false;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        return mainHand ? mainAxeAttached : offhandAxeAttached;
+    }
+
+    /**
+     * Returns the visual wall contact for the axe on the requested body side.
+     * The gameplay contact remains untouched; only rendering is clamped inward
+     * from block edges so an embedded axe cannot appear to float in empty air.
+     */
+    public static Vec3d getVisibleSideAxeContactPoint(boolean leftSide) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) {
+            return null;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        Vec3d contact = mainHand ? mainAxeContactPoint : offhandAxeContactPoint;
+        BlockPos wallPos = mainHand ? mainAxeWallPos : offhandAxeWallPos;
+        Direction wallSide = mainHand ? mainAxeWallSide : offhandAxeWallSide;
+        return clampAxeContactToBlockFace(contact, wallPos, wallSide);
+    }
+
+    /**
+     * Returns the planted wall face for the axe shown on the requested side.
+     */
+    public static Direction getVisibleSideAxeWallSide(boolean leftSide) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) {
+            return null;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        return mainHand ? mainAxeWallSide : offhandAxeWallSide;
+    }
+
+    /**
+     * Returns the supporting block for the axe shown on the requested side.
+     */
+    public static BlockPos getVisibleSideAxeWallPos(boolean leftSide) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) {
+            return null;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        return mainHand ? mainAxeWallPos : offhandAxeWallPos;
+    }
+
+    /**
+     * The wall model replaces the normal held-item render only after the strike
+     * reaches the contact point. Before that moment the vanilla hand still owns
+     * the visible pickaxe, making the hand-to-wall transition continuous.
+     */
+    public static boolean shouldHideVanillaThirdPersonAxe(
+            int renderedEntityId,
+            boolean leftSide
+    ) {
+        if (!shouldApplyThirdPersonClimbingPose(renderedEntityId)
+                || !isVisibleSideAxeAttached(leftSide)) {
+            return false;
+        }
+
+        return getVisibleSideAxePlantProgress(leftSide, 1.0F) >= 0.98F;
+    }
+
+    /**
+     * Constrains a new axe strike to the reachable area around the matching
+     * shoulder. The raycast still chooses the wall/block and influences the
+     * exact point, but cannot place the axe implausibly high or across the
+     * opposite side of the body.
+     */
+    private static Vec3d getReachLimitedAxeContact(
+            MinecraftClient client,
+            BlockHitResult wallHit,
+            boolean mainHand
+    ) {
+        Vec3d rawContact = wallHit.getPos();
+        BlockPos wallPos = wallHit.getBlockPos();
+        Direction wallSide = wallHit.getSide();
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean leftSide = mainHand == mainHandIsLeftSide;
+
+        // Right vector from the climber's perspective while facing into the
+        // wall. SOUTH face -> east, EAST face -> north, and so on.
+        Vec3d wallRight = new Vec3d(
+                wallSide.getOffsetZ(),
+                0.0D,
+                -wallSide.getOffsetX()
+        );
+
+        Vec3d shoulderCenter = client.player.getPos()
+                .add(0.0D, AXE_CONTACT_SHOULDER_HEIGHT, 0.0D)
+                .add(wallRight.multiply(
+                        leftSide ? -AXE_CONTACT_SIDE_BIAS : AXE_CONTACT_SIDE_BIAS
+                ));
+
+        double shoulderAlongWall = shoulderCenter.dotProduct(wallRight);
+        double rawAlongWall = rawContact.dotProduct(wallRight);
+        double reachableAlongWall = clamp(
+                rawAlongWall,
+                shoulderAlongWall - AXE_CONTACT_SIDE_REACH,
+                shoulderAlongWall + AXE_CONTACT_SIDE_REACH
+        );
+
+        double shoulderY = client.player.getY() + AXE_CONTACT_SHOULDER_HEIGHT;
+        double reachableY = clamp(
+                rawContact.y,
+                shoulderY - AXE_CONTACT_DOWN_REACH,
+                shoulderY + AXE_CONTACT_UP_REACH
+        );
+
+        // Start at the centre of the selected block face, then move only along
+        // the wall tangent. This keeps the contact exactly on the chosen face.
+        Vec3d faceCenter = new Vec3d(
+                wallPos.getX() + 0.5D + wallSide.getOffsetX() * 0.5D,
+                reachableY,
+                wallPos.getZ() + 0.5D + wallSide.getOffsetZ() * 0.5D
+        );
+        double faceCenterAlongWall = faceCenter.dotProduct(wallRight);
+        Vec3d reachableContact = faceCenter.add(wallRight.multiply(
+                reachableAlongWall - faceCenterAlongWall
+        ));
+
+        // The block-face inset is applied here as well as in the visual getter
+        // so gameplay contacts and arm targets do not live beyond an edge.
+        double minimumInset = AXE_CONTACT_FACE_INSET;
+        double maximumInset = 1.0D - AXE_CONTACT_FACE_INSET;
+        double x = reachableContact.x;
+        double z = reachableContact.z;
+
+        if (wallSide.getAxis() == Direction.Axis.X) {
+            z = clamp(
+                    z,
+                    wallPos.getZ() + minimumInset,
+                    wallPos.getZ() + maximumInset
+            );
+        } else if (wallSide.getAxis() == Direction.Axis.Z) {
+            x = clamp(
+                    x,
+                    wallPos.getX() + minimumInset,
+                    wallPos.getX() + maximumInset
+            );
+        }
+
+        return new Vec3d(x, reachableY, z);
+    }
+
+    private static Vec3d clampAxeContactToBlockFace(
+            Vec3d contact,
+            BlockPos wallPos,
+            Direction wallSide
+    ) {
+        if (contact == null || wallPos == null || wallSide == null) {
+            return contact;
+        }
+
+        // Keep the head comfortably inside the visible square of the block.
+        // This is a rendering-only correction and never changes attachment or
+        // movement collision data.
+        double minimumInset = 0.18D;
+        double maximumInset = 0.82D;
+        double x = contact.x;
+        double y = clamp(
+                contact.y,
+                wallPos.getY() + minimumInset,
+                wallPos.getY() + maximumInset
+        );
+        double z = contact.z;
+
+        if (wallSide.getAxis() == Direction.Axis.X) {
+            x = wallSide == Direction.EAST
+                    ? wallPos.getX() + 1.0D
+                    : wallPos.getX();
+            z = clamp(
+                    contact.z,
+                    wallPos.getZ() + minimumInset,
+                    wallPos.getZ() + maximumInset
+            );
+        } else if (wallSide.getAxis() == Direction.Axis.Z) {
+            z = wallSide == Direction.SOUTH
+                    ? wallPos.getZ() + 1.0D
+                    : wallPos.getZ();
+            x = clamp(
+                    contact.x,
+                    wallPos.getX() + minimumInset,
+                    wallPos.getX() + maximumInset
+            );
+        }
+
+        // Pull the item a hair outside the surface to avoid z-fighting while
+        // still making the pickaxe head look buried in the block.
+        return new Vec3d(x, y, z).add(
+                wallSide.getOffsetX() * 0.012D,
+                0.0D,
+                wallSide.getOffsetZ() * 0.012D
+        );
+    }
+
+    /**
+     * Returns a 0-1 planting blend for the axe on the requested visible side.
+     * Third-person arms use the same strike timeline as the first-person tools.
+     */
+    public static float getVisibleSideAxePlantProgress(boolean leftSide, float tickDelta) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null) {
+            return 0.0F;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        float previousProgress = mainHand
+                ? previousMainAxeStrikeProgress
+                : previousOffhandAxeStrikeProgress;
+        float currentProgress = mainHand
+                ? mainAxeStrikeProgress
+                : offhandAxeStrikeProgress;
+        float clampedTickDelta = Math.max(0.0F, Math.min(1.0F, tickDelta));
+        float progress = previousProgress
+                + (currentProgress - previousProgress) * clampedTickDelta;
+        return (float) smoothStep(clamp(
+                progress / (float) AXE_IMPACT_PROGRESS,
+                0.0D,
+                1.0D
+        ));
+    }
+
+    /**
+     * Returns the current one-axe pendulum phase in the -1 to 1 range.
+     */
+    public static float getThirdPersonPendulumAmount(float tickDelta) {
+        if (!hasAnyAxeAttached() || hasBothAxesAttached() || mantling) {
+            return 0.0F;
+        }
+
+        double clampedTickDelta = Math.max(0.0D, Math.min(1.0D, tickDelta));
+        double interpolatedPhase = oneAxeSwayPhase + ONE_AXE_SWAY_SPEED * clampedTickDelta;
+        double interpolatedSettle = Math.min(
+                1.0D,
+                oneAxeSettleProgress + ONE_AXE_SETTLE_SPEED * clampedTickDelta
+        );
+        return (float) (
+                Math.sin(interpolatedPhase) * smoothStep(interpolatedSettle)
+        );
+    }
+
+    /**
+     * Returns the current climbing-stride lift for one visible axe. Only the axe
+     * being repositioned during this stride receives a non-zero pulse.
+     */
+    public static float getVisibleSideStridePulse(boolean leftSide, float tickDelta) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || !hasBothAxesAttached() || !isStrideActive()) {
+            return 0.0F;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainHand = leftSide == mainHandIsLeftSide;
+        boolean thisAxeRepositioning = (strideSwayDirection > 0) == mainHand;
+        if (!thisAxeRepositioning) {
+            return 0.0F;
+        }
+
+        double clampedTickDelta = Math.max(0.0D, Math.min(1.0D, tickDelta));
+        double progress = Math.min(
+                1.0D,
+                (strideElapsedTicks + clampedTickDelta)
+                        / (double) Math.max(1, strideDurationTicks)
+        );
+        return (float) Math.sin(Math.PI * progress);
+    }
+
+    /**
+     * Applies the first-person planted pose to the existing vanilla item model.
+     * The contact point influences the small horizontal and vertical corrections,
+     * while the majority of the transform keeps the handle readable on screen.
+     */
+    public static void applyFirstPersonAxeTransform(
+            MatrixStack matrices,
+            Hand hand,
+            float tickDelta
+    ) {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || !isAxeAttached(hand)) {
+            return;
+        }
+
+        boolean mainHand = hand == Hand.MAIN_HAND;
+        Vec3d contactPoint = mainHand ? mainAxeContactPoint : offhandAxeContactPoint;
+        if (contactPoint == null) {
+            return;
+        }
+
+        float clampedTickDelta = Math.max(0.0F, Math.min(1.0F, tickDelta));
+        float previousProgress = mainHand
+                ? previousMainAxeStrikeProgress
+                : previousOffhandAxeStrikeProgress;
+        float currentProgress = mainHand
+                ? mainAxeStrikeProgress
+                : offhandAxeStrikeProgress;
+        double rawStrikeProgress = previousProgress
+                + (currentProgress - previousProgress) * clampedTickDelta;
+        rawStrikeProgress = clamp(rawStrikeProgress, 0.0D, 1.0D);
+
+        // Reach the wall quickly, then use the remaining frames for a tiny
+        // impact recoil and settle. This makes the click, strike, sound, and
+        // final planted pose read as one continuous movement.
+        double travelProgress = smoothStep(clamp(
+                rawStrikeProgress / AXE_IMPACT_PROGRESS,
+                0.0D,
+                1.0D
+        ));
+        double impactSettleProgress = smoothStep(clamp(
+                (rawStrikeProgress - AXE_IMPACT_PROGRESS)
+                        / (1.0D - AXE_IMPACT_PROGRESS),
+                0.0D,
+                1.0D
+        ));
+        double strikeArc = Math.sin(Math.PI * travelProgress);
+        double impactRecoil = Math.sin(Math.PI * impactSettleProgress);
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean handIsLeftSide = mainHand == mainHandIsLeftSide;
+        double side = handIsLeftSide ? -1.0D : 1.0D;
+
+        Vec3d eyePosition = client.gameRenderer.getCamera().getPos();
+        Vec3d toContact = contactPoint.subtract(eyePosition);
+        float cameraYaw = client.gameRenderer.getCamera().getYaw();
+        float cameraPitch = client.gameRenderer.getCamera().getPitch();
+        Vec3d forward = Vec3d.fromPolar(cameraPitch, cameraYaw).normalize();
+        Vec3d right = new Vec3d(0.0D, 1.0D, 0.0D).crossProduct(forward).normalize();
+        Vec3d up = forward.crossProduct(right).normalize();
+
+        double contactHorizontal = clamp(
+                toContact.dotProduct(right),
+                -0.45D,
+                0.45D
+        );
+        double contactVertical = clamp(
+                toContact.dotProduct(up),
+                -0.35D,
+                0.45D
+        );
+
+        double stridePulse = 0.0D;
+        if (hasBothAxesAttached() && isStrideActive()) {
+            boolean thisAxeRepositioning = (strideSwayDirection > 0) == mainHand;
+            if (thisAxeRepositioning) {
+                double progress = Math.min(
+                        1.0D,
+                        (strideElapsedTicks + clampedTickDelta)
+                                / (double) Math.max(1, strideDurationTicks)
+                );
+                stridePulse = Math.sin(Math.PI * progress);
+            }
+        }
+
+        double translateX = (
+                -side * AXE_BASE_INWARD_SHIFT
+                        + contactHorizontal * AXE_CONTACT_HORIZONTAL_FOLLOW
+        ) * travelProgress;
+        double translateY = (
+                AXE_BASE_RAISE
+                        + contactVertical * AXE_CONTACT_VERTICAL_FOLLOW
+                        + stridePulse * AXE_STRIDE_LIFT
+        ) * travelProgress
+                + strikeArc * AXE_STRIKE_ARC_RAISE;
+        double translateZ = (
+                AXE_BASE_FORWARD_SHIFT
+                        + stridePulse * AXE_STRIDE_RETRACT
+        ) * travelProgress
+                - strikeArc * AXE_STRIKE_FORWARD_PUNCH
+                + impactRecoil * AXE_IMPACT_RECOIL;
+
+        matrices.translate(translateX, translateY, translateZ);
+        matrices.multiply(RotationAxis.POSITIVE_X.rotationDegrees((float) (
+                AXE_PLANTED_X_ROTATION * travelProgress
+                        + AXE_STRIKE_EXTRA_X_ROTATION * strikeArc
+        )));
+        matrices.multiply(RotationAxis.POSITIVE_Y.rotationDegrees(
+                (float) (side * AXE_PLANTED_Y_ROTATION * travelProgress)
+        ));
+        matrices.multiply(RotationAxis.POSITIVE_Z.rotationDegrees((float) (
+                -side * AXE_PLANTED_Z_ROTATION * travelProgress
+                        - side * AXE_STRIKE_EXTRA_Z_ROTATION * strikeArc
+        )));
     }
 
     private static void updateCameraSway(MinecraftClient client) {
@@ -1153,6 +1839,12 @@ public class FarClimbClient implements ClientModInitializer {
         resetMantleState();
         resetOneAxeHangState();
         resetTwoAxeStabilization();
+        previousMainAxeStrikeProgress = 0.0F;
+        mainAxeStrikeProgress = 0.0F;
+        mainAxeImpactPlayed = false;
+        previousOffhandAxeStrikeProgress = 0.0F;
+        offhandAxeStrikeProgress = 0.0F;
+        offhandAxeImpactPlayed = false;
     }
 
     private static boolean isClimbableFace(
@@ -1225,6 +1917,40 @@ public class FarClimbClient implements ClientModInitializer {
         boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
         boolean handIsLeftSide = mainHand == mainHandIsLeftSide;
         return handIsLeftSide ? "left click" : "right click";
+    }
+
+    /**
+     * Returns whether FarClimb currently owns the physical left mouse button.
+     * Used by a MinecraftClient mixin to prevent vanilla's main-hand swing from
+     * playing on top of the custom left-side axe strike.
+     */
+    public static boolean shouldCaptureLeftClick() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null || client.currentScreen != null) {
+            return false;
+        }
+
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        return (mainHandIsLeftSide
+                ? client.player.getMainHandStack()
+                : client.player.getOffHandStack()).isOf(ModItems.CLIMBING_AXE);
+    }
+
+    /**
+     * Returns whether FarClimb currently owns the physical right mouse button.
+     * This prevents vanilla item-use motion from competing with the custom
+     * right-side axe strike.
+     */
+    public static boolean shouldCaptureRightClick() {
+        MinecraftClient client = MinecraftClient.getInstance();
+        if (client.player == null || client.world == null || client.currentScreen != null) {
+            return false;
+        }
+
+        boolean mainHandIsRightSide = client.player.getMainArm() == Arm.RIGHT;
+        return (mainHandIsRightSide
+                ? client.player.getMainHandStack()
+                : client.player.getOffHandStack()).isOf(ModItems.CLIMBING_AXE);
     }
 
     private static BlockHitResult getClimbableWallHit(MinecraftClient client) {

@@ -1,0 +1,8 @@
+-XDshouldStop.at=PARSE
+-proc:none
+src/client/java/com/cjeme26/farclimb/client/FarClimbClient.java
+src/client/java/com/cjeme26/farclimb/client/mixin/CameraMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/EntityLookMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/HeldItemRendererMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/MinecraftClientMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/PlayerEntityModelMixin.java

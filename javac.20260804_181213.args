@@ -1,0 +1,9 @@
+-proc:none
+-Xmaxerrs
+10000
+src/client/java/com/cjeme26/farclimb/client/mixin/MinecraftClientMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/CameraMixin.java
+src/client/java/com/cjeme26/farclimb/client/mixin/HeldItemRendererMixin.java
+src/client/java/com/cjeme26/farclimb/client/FarClimbClient.java
+src/main/java/com/cjeme26/farclimb/item/ModItems.java
+src/main/java/com/cjeme26/farclimb/FarClimb.java

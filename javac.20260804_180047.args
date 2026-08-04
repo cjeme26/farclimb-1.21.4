@@ -1,0 +1,3 @@
+-proc:none
+src/client/java/com/cjeme26/farclimb/client/FarClimbClient.java
+src/client/java/com/cjeme26/farclimb/client/mixin/HeldItemRendererMixin.java
