@@ -1,9 +1,7 @@
 # FarClimb
 
-## Setup
+A Fabric 1.21.4 mountaineering mod focused on deliberate two-axe climbing.
 
-For setup instructions, please see the [Fabric Documentation page](https://docs.fabricmc.net/develop/getting-started/creating-a-project#setting-up) related to the IDE that you are using.
+## Current milestone
 
-## License
-
-This template is available under the CC0 license. Feel free to learn from it and incorporate it in your own projects.
+Milestone 2.0 detects a Climbing Axe independently in the player's main hand and offhand, and reports equipment-state changes in the action bar.
