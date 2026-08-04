@@ -1,0 +1,4 @@
+-proc:none
+-Xmaxerrs
+1000
+src/client/java/com/cjeme26/farclimb/client/FarClimbClient.java

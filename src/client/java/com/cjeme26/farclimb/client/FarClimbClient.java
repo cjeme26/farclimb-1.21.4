@@ -3,12 +3,17 @@ package com.cjeme26.farclimb.client;
 import com.cjeme26.farclimb.item.ModItems;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
+import net.fabricmc.fabric.api.event.player.UseBlockCallback;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.sound.SoundCategory;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
+import net.minecraft.util.ActionResult;
+import net.minecraft.util.Arm;
+import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.BlockPos;
@@ -20,7 +25,7 @@ import java.util.Random;
 public class FarClimbClient implements ClientModInitializer {
     private static final double WALL_REACH = 1.75D;
 
-    // Each climbing input creates one stride. The stride is then eased smoothly
+    // Each climbing input creates one stride. The stride is eased smoothly
     // from its start to its target over several ticks.
     private static final double MIN_UP_STRIDE = 0.30D;
     private static final double MAX_UP_STRIDE = 0.40D;
@@ -46,8 +51,7 @@ public class FarClimbClient implements ClientModInitializer {
     private static final double WALL_FACE_EPSILON = 0.01D;
 
     // Stationary hanging uses a slow, broad pendulum motion. Active climbing
-    // uses a separate alternating pulse tied to each stride, so the camera lean
-    // remains visible even when a large upward pull dominates the screen motion.
+    // uses a separate alternating pulse tied to each stride.
     private static final float STATIONARY_SWAY_DEGREES = 1.55F;
     private static final double STATIONARY_SWAY_SPEED = 0.075D;
     private static final float UP_STRIDE_SWAY_DEGREES = 3.00F;
@@ -57,11 +61,41 @@ public class FarClimbClient implements ClientModInitializer {
     private static final float MOVING_SWAY_RESPONSE = 0.30F;
     private static final float SWAY_RETURN_RESPONSE = 0.18F;
 
+    // One-axe hanging treats the attached axe as a fixed pivot. The player's
+    // body moves in a slow arc below it while the camera leans less than the
+    // body displacement, suggesting that the lower body swings farther.
+    private static final double ONE_AXE_SWAY_SPEED = 0.065D;
+    private static final double ONE_AXE_SWAY_DISTANCE = 0.25D;
+    private static final double ONE_AXE_HAND_BIAS = 0.06D;
+    private static final double ONE_AXE_BASE_DROP = 0.08D;
+    private static final double ONE_AXE_ARC_RISE = 0.025D;
+    private static final double ONE_AXE_SETTLE_SPEED = 0.09D;
+    private static final float ONE_AXE_CAMERA_SWAY_DEGREES = 4.25F;
+    private static final float ONE_AXE_CAMERA_BIAS_DEGREES = 1.35F;
+    private static final float ONE_AXE_CAMERA_RESPONSE = 0.16F;
+    private static final double ONE_AXE_CAMERA_LATERAL_FOLLOW = 0.38D;
+    private static final double ONE_AXE_CAMERA_VERTICAL_FOLLOW = 0.65D;
+    private static final double CAMERA_POSITION_RESPONSE = 0.24D;
+    private static final int TWO_AXE_STABILIZE_DURATION_TICKS = 10;
+
     private static final Random STRIDE_RANDOM = new Random();
 
     private static int previousClimbingState = -1;
+    private static boolean previousAttackKeyPressed = false;
+    private static boolean previousUseKeyPressed = false;
 
-    private static boolean attached = false;
+    // Milestone 6.0 tracks each axe separately. The shared attachment position
+    // is the player's body position; each axe keeps its own wall contact.
+    private static boolean mainAxeAttached = false;
+    private static Vec3d mainAxeContactPoint;
+    private static BlockPos mainAxeWallPos;
+    private static Direction mainAxeWallSide;
+
+    private static boolean offhandAxeAttached = false;
+    private static Vec3d offhandAxeContactPoint;
+    private static BlockPos offhandAxeWallPos;
+    private static Direction offhandAxeWallSide;
+
     private static boolean previousNoGravity = false;
     private static Vec3d attachmentPosition;
     private static Vec3d attachmentContactPoint;
@@ -69,9 +103,11 @@ public class FarClimbClient implements ClientModInitializer {
     private static Direction attachmentWallSide;
 
     private static Vec3d strideStartPosition;
-    private static Vec3d strideStartContactPoint;
+    private static Vec3d strideStartMainContactPoint;
+    private static Vec3d strideStartOffhandContactPoint;
     private static Vec3d strideTargetPosition;
-    private static Vec3d strideTargetContactPoint;
+    private static Vec3d strideTargetMainContactPoint;
+    private static Vec3d strideTargetOffhandContactPoint;
     private static int strideElapsedTicks = 0;
     private static int strideDurationTicks = 0;
     private static int strideSwayDirection = 1;
@@ -87,10 +123,54 @@ public class FarClimbClient implements ClientModInitializer {
     private static double cameraSwayPhase = 0.0D;
     private static float previousCameraRollDegrees = 0.0F;
     private static float cameraRollDegrees = 0.0F;
+    private static Vec3d previousCameraPositionOffset = Vec3d.ZERO;
+    private static Vec3d cameraPositionOffset = Vec3d.ZERO;
+
+    private static Vec3d oneAxeHangBasePosition;
+    private static double oneAxeSwayPhase = 0.0D;
+    private static double oneAxeSettleProgress = 0.0D;
+
+    private static Vec3d stabilizationStartPosition;
+    private static Vec3d stabilizationTargetPosition;
+    private static int stabilizationElapsedTicks = 0;
 
     @Override
     public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(FarClimbClient::tickClimbing);
+
+        // Mouse buttons are mapped to the hands as they appear on screen:
+        // left click controls the visible left-side axe and right click controls
+        // the visible right-side axe. This also respects Minecraft's Main Hand
+        // setting for players who choose a left-handed character.
+        AttackBlockCallback.EVENT.register((player, world, hand, pos, direction) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            boolean mainHandIsLeftSide = player.getMainArm() == Arm.LEFT;
+            boolean leftSideAxeEquipped = (mainHandIsLeftSide
+                    ? player.getMainHandStack()
+                    : player.getOffHandStack()).isOf(ModItems.CLIMBING_AXE);
+
+            if (player == client.player && leftSideAxeEquipped) {
+                return ActionResult.FAIL;
+            }
+
+            return ActionResult.PASS;
+        });
+
+        // Reserve right click when the axe visible on the right side is equipped,
+        // preventing normal block use before FarClimb handles the toggle.
+        UseBlockCallback.EVENT.register((player, world, hand, hitResult) -> {
+            MinecraftClient client = MinecraftClient.getInstance();
+            boolean mainHandIsRightSide = player.getMainArm() == Arm.RIGHT;
+            boolean rightSideAxeEquipped = (mainHandIsRightSide
+                    ? player.getMainHandStack()
+                    : player.getOffHandStack()).isOf(ModItems.CLIMBING_AXE);
+
+            if (player == client.player && rightSideAxeEquipped) {
+                return ActionResult.FAIL;
+            }
+
+            return ActionResult.PASS;
+        });
     }
 
     private static void tickClimbing(MinecraftClient client) {
@@ -102,64 +182,271 @@ public class FarClimbClient implements ClientModInitializer {
         if (client.player == null || client.world == null) {
             resetAttachmentState();
             previousClimbingState = -1;
+            previousAttackKeyPressed = false;
+            previousUseKeyPressed = false;
             return;
         }
 
-        boolean mainHandAxe = client.player.getMainHandStack().isOf(ModItems.CLIMBING_AXE);
-        boolean offhandAxe = client.player.getOffHandStack().isOf(ModItems.CLIMBING_AXE);
-        boolean attachKeyHeld = client.options.sneakKey.isPressed();
+        boolean attackKeyPressed = client.options.attackKey.isPressed();
+        boolean useKeyPressed = client.options.useKey.isPressed();
+        boolean leftSideClick = attackKeyPressed && !previousAttackKeyPressed;
+        boolean rightSideClick = useKeyPressed && !previousUseKeyPressed;
+        previousAttackKeyPressed = attackKeyPressed;
+        previousUseKeyPressed = useKeyPressed;
 
-        if (attached) {
-            if (!mainHandAxe || !offhandAxe) {
-                detach(client, "Detached - both climbing axes are required", mainHandAxe, offhandAxe);
+        // Internally Minecraft tracks MAIN_HAND and OFF_HAND, but the player sees
+        // a left and right hand. Convert the physical mouse side into the correct
+        // Minecraft hand according to the player's configured main arm.
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean mainAxeClick = mainHandIsLeftSide ? leftSideClick : rightSideClick;
+        boolean offhandAxeClick = mainHandIsLeftSide ? rightSideClick : leftSideClick;
+
+        // Never interpret clicks made in inventories, menus, or chat as axe input.
+        if (client.currentScreen != null) {
+            return;
+        }
+
+        boolean mainHandAxeEquipped = client.player.getMainHandStack().isOf(ModItems.CLIMBING_AXE);
+        boolean offhandAxeEquipped = client.player.getOffHandStack().isOf(ModItems.CLIMBING_AXE);
+
+        // Removing an axe from its hand releases only that axe. The other axe,
+        // if still attached, continues to support the player.
+        if (mainAxeAttached && !mainHandAxeEquipped) {
+            releaseAxe(client, true, getAxeDisplayName(client, true) + " axe released - item removed");
+        }
+        if (offhandAxeAttached && !offhandAxeEquipped) {
+            releaseAxe(client, false, getAxeDisplayName(client, false) + " axe released - item removed");
+        }
+
+        validateAttachedSurfaces(client);
+
+        // A mantle is already committed movement. Ignore click toggles until it
+        // finishes, but still cancel it if its ledge becomes invalid.
+        if (mantling) {
+            if (!hasBothAxesAttached()) {
+                detachCompletely(client, "Mantle cancelled - both axes are required");
                 return;
             }
 
-            // Once a mantle begins, it finishes automatically even if Sneak or W
-            // is released. This avoids dropping the player in the middle of the lip.
-            if (mantling) {
-                if (!isMantleSurfaceStillValid(client)) {
-                    detach(client, "Mantle cancelled - ledge lost", mainHandAxe, offhandAxe);
-                    return;
-                }
-
-                advanceMantle(client);
-                holdPlayerAtAttachment(client);
+            if (!isMantleSurfaceStillValid(client)) {
+                detachCompletely(client, "Mantle cancelled - ledge lost");
                 return;
             }
 
-            if (!attachKeyHeld) {
-                detach(client, "Detached from wall", mainHandAxe, offhandAxe);
-                return;
-            }
-
-            if (!isAttachmentSurfaceStillValid(client)) {
-                detach(client, "Detached - climbing surface lost", mainHandAxe, offhandAxe);
-                return;
-            }
-
-            moveWhileAttached(client);
+            advanceMantle(client);
             holdPlayerAtAttachment(client);
             return;
         }
 
-        BlockHitResult climbableWall = mainHandAxe && offhandAxe
-                ? getClimbableWallHit(client)
-                : null;
+        if (mainAxeClick && mainHandAxeEquipped) {
+            toggleAxe(client, true);
+        }
+        if (offhandAxeClick && offhandAxeEquipped) {
+            toggleAxe(client, false);
+        }
 
-        if (mainHandAxe && offhandAxe && attachKeyHeld && climbableWall != null) {
-            attach(client, climbableWall);
+        if (!hasAnyAxeAttached()) {
+            BlockHitResult climbableWall = mainHandAxeEquipped || offhandAxeEquipped
+                    ? getClimbableWallHit(client)
+                    : null;
+            int currentClimbingState = getClimbingState(
+                    mainHandAxeEquipped,
+                    offhandAxeEquipped,
+                    climbableWall != null
+            );
+
+            if (currentClimbingState != previousClimbingState) {
+                previousClimbingState = currentClimbingState;
+                client.player.sendMessage(getStatusMessage(client, currentClimbingState), true);
+            }
             return;
         }
 
-        int currentClimbingState = getClimbingState(mainHandAxe, offhandAxe, climbableWall != null);
+        if (hasBothAxesAttached()) {
+            if (isTwoAxeStabilizationActive()) {
+                advanceTwoAxeStabilization(client);
+            } else {
+                moveWhileAttached(client);
+            }
+        } else {
+            // One axe acts as a fixed pivot. The player's body follows a slow
+            // collision-aware pendulum arc below the attached hand.
+            resetStrideState();
+            updateOneAxeHang(client);
+        }
 
-        if (currentClimbingState == previousClimbingState) {
+        holdPlayerAtAttachment(client);
+    }
+
+    private static void toggleAxe(MinecraftClient client, boolean mainHand) {
+        if (mainHand ? mainAxeAttached : offhandAxeAttached) {
+            releaseAxe(
+                    client,
+                    mainHand,
+                    getAxeDisplayName(client, mainHand) + " axe released"
+            );
             return;
         }
 
-        previousClimbingState = currentClimbingState;
-        client.player.sendMessage(getStatusMessage(currentClimbingState), true);
+        attachAxe(client, mainHand);
+    }
+
+    private static void attachAxe(MinecraftClient client, boolean mainHand) {
+        BlockHitResult wallHit = getClimbableWallHit(client);
+        String axeName = getAxeDisplayName(client, mainHand);
+
+        if (wallHit == null) {
+            client.player.sendMessage(Text.literal(axeName + " axe missed - no wall in reach"), true);
+            syncPreviousClimbingState(client);
+            return;
+        }
+
+        if (hasAnyAxeAttached()) {
+            Direction supportingSide = getRemainingAttachedWallSide();
+            if (supportingSide != null && wallHit.getSide() != supportingSide) {
+                client.player.sendMessage(
+                        Text.literal("Both axes must attach to the same wall face"),
+                        true
+                );
+                return;
+            }
+        } else {
+            Vec3d snappedAttachmentPosition = getSnappedAttachmentPosition(client, wallHit);
+            if (!isDestinationClear(client, snappedAttachmentPosition)) {
+                client.player.sendMessage(Text.literal("Unable to attach - position blocked"), true);
+                syncPreviousClimbingState(client);
+                return;
+            }
+
+            previousNoGravity = client.player.hasNoGravity();
+            attachmentPosition = snappedAttachmentPosition;
+            attachmentWallSide = wallHit.getSide();
+        }
+
+        if (mainHand) {
+            mainAxeAttached = true;
+            mainAxeContactPoint = wallHit.getPos();
+            mainAxeWallPos = wallHit.getBlockPos().toImmutable();
+            mainAxeWallSide = wallHit.getSide();
+        } else {
+            offhandAxeAttached = true;
+            offhandAxeContactPoint = wallHit.getPos();
+            offhandAxeWallPos = wallHit.getBlockPos().toImmutable();
+            offhandAxeWallSide = wallHit.getSide();
+        }
+
+        refreshSharedAttachmentReference();
+        resetStrideState();
+
+        if (hasBothAxesAttached()) {
+            beginTwoAxeStabilization();
+        } else {
+            beginOneAxeHang();
+        }
+
+        previousClimbingState = 5;
+        holdPlayerAtAttachment(client);
+        client.player.swingHand(mainHand ? Hand.MAIN_HAND : Hand.OFF_HAND);
+
+        client.player.playSoundToPlayer(
+                SoundEvents.BLOCK_ANVIL_PLACE,
+                SoundCategory.PLAYERS,
+                0.55F,
+                mainHand ? 1.42F : 1.52F
+        );
+
+        if (hasBothAxesAttached()) {
+            client.player.sendMessage(
+                    Text.literal("Both axes attached - use W/A/S/D to climb"),
+                    true
+            );
+        } else {
+            client.player.sendMessage(
+                    Text.literal(axeName + " axe attached - hanging from one axe"),
+                    true
+            );
+        }
+    }
+
+    private static void releaseAxe(MinecraftClient client, boolean mainHand, String message) {
+        if (mainHand) {
+            mainAxeAttached = false;
+            mainAxeContactPoint = null;
+            mainAxeWallPos = null;
+            mainAxeWallSide = null;
+        } else {
+            offhandAxeAttached = false;
+            offhandAxeContactPoint = null;
+            offhandAxeWallPos = null;
+            offhandAxeWallSide = null;
+        }
+
+        resetStrideState();
+
+        if (!hasAnyAxeAttached()) {
+            detachCompletely(client, message + " - falling");
+            return;
+        }
+
+        refreshSharedAttachmentReference();
+        beginOneAxeHang();
+        holdPlayerAtAttachment(client);
+
+        String support = mainAxeAttached
+                ? getAxeDisplayName(client, true).toLowerCase() + " axe"
+                : getAxeDisplayName(client, false).toLowerCase() + " axe";
+        client.player.sendMessage(Text.literal(message + " - hanging from " + support), true);
+    }
+
+    private static void validateAttachedSurfaces(MinecraftClient client) {
+        if (mainAxeAttached && !isClimbableFace(client, mainAxeWallPos, mainAxeWallSide)) {
+            releaseAxe(client, true, getAxeDisplayName(client, true) + " axe lost its grip");
+        }
+
+        if (offhandAxeAttached && !isClimbableFace(client, offhandAxeWallPos, offhandAxeWallSide)) {
+            releaseAxe(client, false, getAxeDisplayName(client, false) + " axe lost its grip");
+        }
+    }
+
+    private static boolean hasAnyAxeAttached() {
+        return mainAxeAttached || offhandAxeAttached;
+    }
+
+    private static boolean hasBothAxesAttached() {
+        return mainAxeAttached && offhandAxeAttached;
+    }
+
+    private static Direction getRemainingAttachedWallSide() {
+        if (mainAxeAttached) {
+            return mainAxeWallSide;
+        }
+        if (offhandAxeAttached) {
+            return offhandAxeWallSide;
+        }
+        return null;
+    }
+
+    private static void refreshSharedAttachmentReference() {
+        if (hasBothAxesAttached()) {
+            attachmentContactPoint = mainAxeContactPoint.add(offhandAxeContactPoint).multiply(0.5D);
+            attachmentWallSide = mainAxeWallSide;
+            attachmentWallPos = getWallBlockAtContact(
+                    attachmentContactPoint,
+                    attachmentWallSide
+            ).toImmutable();
+        } else if (mainAxeAttached) {
+            attachmentContactPoint = mainAxeContactPoint;
+            attachmentWallPos = mainAxeWallPos;
+            attachmentWallSide = mainAxeWallSide;
+        } else if (offhandAxeAttached) {
+            attachmentContactPoint = offhandAxeContactPoint;
+            attachmentWallPos = offhandAxeWallPos;
+            attachmentWallSide = offhandAxeWallSide;
+        } else {
+            attachmentContactPoint = null;
+            attachmentWallPos = null;
+            attachmentWallSide = null;
+        }
     }
 
     private static void updateCameraSway(MinecraftClient client) {
@@ -167,20 +454,40 @@ public class FarClimbClient implements ClientModInitializer {
             cameraSwayPhase = 0.0D;
             previousCameraRollDegrees = 0.0F;
             cameraRollDegrees = 0.0F;
+            previousCameraPositionOffset = Vec3d.ZERO;
+            cameraPositionOffset = Vec3d.ZERO;
             return;
         }
 
         previousCameraRollDegrees = cameraRollDegrees;
+        previousCameraPositionOffset = cameraPositionOffset;
 
-        boolean swayActive = attached && !mantling;
-        boolean moving = swayActive && isStrideActive();
+        boolean swayActive = hasAnyAxeAttached() && !mantling;
+        boolean oneAxeHanging = hasAnyAxeAttached() && !hasBothAxesAttached() && !mantling;
+        boolean moving = hasBothAxesAttached() && isStrideActive();
         float targetRoll = 0.0F;
         float response = SWAY_RETURN_RESPONSE;
+        Vec3d targetCameraPositionOffset = Vec3d.ZERO;
 
-        if (moving) {
-            // One half-wave per stride: lean out during the pull and return to
-            // centre at the target. The sign alternates so consecutive pulls
-            // resemble left-hand/right-hand climbing movement.
+        if (oneAxeHanging) {
+            float attachedHandBias = mainAxeAttached
+                    ? ONE_AXE_CAMERA_BIAS_DEGREES
+                    : -ONE_AXE_CAMERA_BIAS_DEGREES;
+            float pendulumRoll = (float) -Math.sin(oneAxeSwayPhase)
+                    * ONE_AXE_CAMERA_SWAY_DEGREES;
+
+            targetRoll = attachedHandBias + pendulumRoll;
+            response = ONE_AXE_CAMERA_RESPONSE;
+
+            if (oneAxeHangBasePosition != null && attachmentPosition != null) {
+                Vec3d bodyOffset = attachmentPosition.subtract(oneAxeHangBasePosition);
+                targetCameraPositionOffset = new Vec3d(
+                        bodyOffset.x * (ONE_AXE_CAMERA_LATERAL_FOLLOW - 1.0D),
+                        bodyOffset.y * (ONE_AXE_CAMERA_VERTICAL_FOLLOW - 1.0D),
+                        bodyOffset.z * (ONE_AXE_CAMERA_LATERAL_FOLLOW - 1.0D)
+                );
+            }
+        } else if (moving) {
             double progress = Math.min(
                     1.0D,
                     strideElapsedTicks / (double) Math.max(1, strideDurationTicks)
@@ -190,23 +497,28 @@ public class FarClimbClient implements ClientModInitializer {
                     * strideSwayAmplitudeDegrees
                     * strideSwayDirection;
             response = MOVING_SWAY_RESPONSE;
-        } else if (swayActive) {
+        } else if (swayActive && !isTwoAxeStabilizationActive()) {
             cameraSwayPhase += STATIONARY_SWAY_SPEED;
             targetRoll = (float) Math.sin(cameraSwayPhase) * STATIONARY_SWAY_DEGREES;
             response = STATIONARY_SWAY_RESPONSE;
         }
 
         cameraRollDegrees += (targetRoll - cameraRollDegrees) * response;
+        cameraPositionOffset = cameraPositionOffset.lerp(
+                targetCameraPositionOffset,
+                CAMERA_POSITION_RESPONSE
+        );
 
         if (!swayActive && Math.abs(cameraRollDegrees) < 0.01F) {
             cameraRollDegrees = 0.0F;
+        }
+        if (!oneAxeHanging && cameraPositionOffset.lengthSquared() < 0.000001D) {
+            cameraPositionOffset = Vec3d.ZERO;
         }
     }
 
     /**
      * Returns the smoothly interpolated first-person roll for the current frame.
-     * The camera mixin calls this after Minecraft has built its normal camera
-     * rotation, so FarClimb does not depend on the vanilla View Bobbing option.
      */
     public static float getCameraRollDegrees(float tickDelta) {
         float clampedTickDelta = Math.max(0.0F, Math.min(1.0F, tickDelta));
@@ -214,34 +526,151 @@ public class FarClimbClient implements ClientModInitializer {
                 + (cameraRollDegrees - previousCameraRollDegrees) * clampedTickDelta;
     }
 
-    private static void attach(MinecraftClient client, BlockHitResult wallHit) {
-        Vec3d snappedAttachmentPosition = getSnappedAttachmentPosition(client, wallHit);
+    /**
+     * Returns a first-person positional correction that keeps the camera closer
+     * to the axe pivot while the lower body follows the wider pendulum arc.
+     */
+    public static Vec3d getCameraPositionOffset(float tickDelta) {
+        double clampedTickDelta = Math.max(0.0D, Math.min(1.0D, tickDelta));
+        return previousCameraPositionOffset.lerp(cameraPositionOffset, clampedTickDelta);
+    }
 
-        // Keep the climber close enough that the axes appear to reach the wall.
-        // If the snapped position is obstructed, do not begin attachment.
-        if (!isDestinationClear(client, snappedAttachmentPosition)) {
-            client.player.sendMessage(Text.literal("Unable to attach - position blocked"), true);
+    private static void beginOneAxeHang() {
+        oneAxeHangBasePosition = attachmentPosition;
+        oneAxeSwayPhase = 0.0D;
+        oneAxeSettleProgress = 0.0D;
+        resetTwoAxeStabilization();
+    }
+
+    private static void updateOneAxeHang(MinecraftClient client) {
+        if (hasBothAxesAttached() || !hasAnyAxeAttached() || attachmentWallSide == null) {
+            resetOneAxeHangState();
             return;
         }
 
-        attached = true;
-        previousNoGravity = client.player.hasNoGravity();
-        attachmentPosition = snappedAttachmentPosition;
-        attachmentContactPoint = wallHit.getPos();
-        attachmentWallPos = wallHit.getBlockPos().toImmutable();
-        attachmentWallSide = wallHit.getSide();
-        resetStrideState();
-        previousClimbingState = 5;
+        if (oneAxeHangBasePosition == null) {
+            beginOneAxeHang();
+        }
 
-        holdPlayerAtAttachment(client);
-
-        client.player.playSoundToPlayer(
-                SoundEvents.BLOCK_ANVIL_PLACE,
-                SoundCategory.PLAYERS,
-                0.65F,
-                1.35F
+        oneAxeSwayPhase += ONE_AXE_SWAY_SPEED;
+        oneAxeSettleProgress = Math.min(
+                1.0D,
+                oneAxeSettleProgress + ONE_AXE_SETTLE_SPEED
         );
-        client.player.sendMessage(Text.literal("Attached - use W/A/S/D to climb"), true);
+
+        double settle = smoothStep(oneAxeSettleProgress);
+        double swing = Math.sin(oneAxeSwayPhase);
+        double handBias = mainAxeAttached ? -ONE_AXE_HAND_BIAS : ONE_AXE_HAND_BIAS;
+        double sidewaysOffset = (handBias + swing * ONE_AXE_SWAY_DISTANCE) * settle;
+
+        // The body hangs lowest near the middle of the arc and rises slightly
+        // toward either side, approximating a short pendulum under the axe.
+        double verticalOffset = (
+                -ONE_AXE_BASE_DROP
+                        + ONE_AXE_ARC_RISE * swing * swing
+        ) * settle;
+
+        Direction rightAlongWall = attachmentWallSide.rotateYCounterclockwise();
+        Vec3d candidatePosition = oneAxeHangBasePosition.add(
+                rightAlongWall.getOffsetX() * sidewaysOffset,
+                verticalOffset,
+                rightAlongWall.getOffsetZ() * sidewaysOffset
+        );
+
+        attachmentPosition = getSafeOneAxeHangPosition(
+                client,
+                oneAxeHangBasePosition,
+                candidatePosition
+        );
+    }
+
+    private static Vec3d getSafeOneAxeHangPosition(
+            MinecraftClient client,
+            Vec3d basePosition,
+            Vec3d desiredPosition
+    ) {
+        if (isDestinationClear(client, desiredPosition)) {
+            return desiredPosition;
+        }
+
+        // Near corners or protrusions, keep the pendulum feeling but reduce its
+        // amplitude instead of clipping the player into the terrain.
+        Vec3d reducedPosition = basePosition.lerp(desiredPosition, 0.55D);
+        if (isDestinationClear(client, reducedPosition)) {
+            return reducedPosition;
+        }
+
+        Vec3d minimalPosition = basePosition.lerp(desiredPosition, 0.20D);
+        if (isDestinationClear(client, minimalPosition)) {
+            return minimalPosition;
+        }
+
+        return attachmentPosition != null ? attachmentPosition : basePosition;
+    }
+
+    private static void beginTwoAxeStabilization() {
+        if (attachmentPosition == null) {
+            resetTwoAxeStabilization();
+            resetOneAxeHangState();
+            return;
+        }
+
+        stabilizationStartPosition = attachmentPosition;
+        stabilizationTargetPosition = oneAxeHangBasePosition != null
+                ? oneAxeHangBasePosition
+                : attachmentPosition;
+        stabilizationElapsedTicks = 0;
+        resetOneAxeHangState();
+
+        if (stabilizationStartPosition.squaredDistanceTo(stabilizationTargetPosition) < 0.000001D) {
+            resetTwoAxeStabilization();
+        }
+    }
+
+    private static void advanceTwoAxeStabilization(MinecraftClient client) {
+        if (!isTwoAxeStabilizationActive() || !hasBothAxesAttached()) {
+            resetTwoAxeStabilization();
+            return;
+        }
+
+        stabilizationElapsedTicks++;
+        double progress = Math.min(
+                1.0D,
+                stabilizationElapsedTicks / (double) TWO_AXE_STABILIZE_DURATION_TICKS
+        );
+        Vec3d nextPosition = stabilizationStartPosition.lerp(
+                stabilizationTargetPosition,
+                smoothStep(progress)
+        );
+
+        if (!isDestinationClear(client, nextPosition)) {
+            resetTwoAxeStabilization();
+            return;
+        }
+
+        attachmentPosition = nextPosition;
+
+        if (progress >= 1.0D) {
+            attachmentPosition = stabilizationTargetPosition;
+            resetTwoAxeStabilization();
+        }
+    }
+
+    private static boolean isTwoAxeStabilizationActive() {
+        return stabilizationStartPosition != null
+                && stabilizationTargetPosition != null;
+    }
+
+    private static void resetOneAxeHangState() {
+        oneAxeHangBasePosition = null;
+        oneAxeSwayPhase = 0.0D;
+        oneAxeSettleProgress = 0.0D;
+    }
+
+    private static void resetTwoAxeStabilization() {
+        stabilizationStartPosition = null;
+        stabilizationTargetPosition = null;
+        stabilizationElapsedTicks = 0;
     }
 
     private static Vec3d getSnappedAttachmentPosition(
@@ -279,6 +708,11 @@ public class FarClimbClient implements ClientModInitializer {
     }
 
     private static void moveWhileAttached(MinecraftClient client) {
+        if (!hasBothAxesAttached()) {
+            resetStrideState();
+            return;
+        }
+
         if (isStrideActive()) {
             advanceStride(client);
             return;
@@ -306,8 +740,6 @@ public class FarClimbClient implements ClientModInitializer {
         }
 
         if (sidewaysInput && attachmentWallSide != null) {
-            // The hit face points from the wall toward the player, so counterclockwise
-            // gives the player's visual right while they face into the wall.
             Direction rightAlongWall = attachmentWallSide.rotateYCounterclockwise();
             double sidewaysStride = randomBetween(MIN_SIDEWAYS_STRIDE, MAX_SIDEWAYS_STRIDE);
 
@@ -324,29 +756,39 @@ public class FarClimbClient implements ClientModInitializer {
 
         boolean strideStarted = beginStride(client, movement);
 
-        // If upward movement has reached the end of the wall, try to pull the
-        // player over the current block's top instead of simply stopping.
         if (!strideStarted && forward && tryBeginMantle(client)) {
             advanceMantle(client);
             return;
         }
 
-        // Start the first eased increment immediately so input feels responsive.
         if (isStrideActive()) {
             advanceStride(client);
         }
     }
 
     private static boolean beginStride(MinecraftClient client, Vec3d movement) {
-        if (attachmentPosition == null || attachmentContactPoint == null || attachmentWallSide == null) {
+        if (!hasBothAxesAttached()
+                || attachmentPosition == null
+                || attachmentWallSide == null
+                || mainAxeContactPoint == null
+                || offhandAxeContactPoint == null) {
             return false;
         }
 
         Vec3d candidatePosition = attachmentPosition.add(movement);
-        Vec3d candidateContactPoint = attachmentContactPoint.add(movement);
-        BlockPos candidateWallPos = getWallBlockAtContact(candidateContactPoint, attachmentWallSide);
+        Vec3d candidateMainContact = mainAxeContactPoint.add(movement);
+        Vec3d candidateOffhandContact = offhandAxeContactPoint.add(movement);
+        BlockPos candidateMainWallPos = getWallBlockAtContact(
+                candidateMainContact,
+                mainAxeWallSide
+        );
+        BlockPos candidateOffhandWallPos = getWallBlockAtContact(
+                candidateOffhandContact,
+                offhandAxeWallSide
+        );
 
-        if (!isClimbableFace(client, candidateWallPos, attachmentWallSide)) {
+        if (!isClimbableFace(client, candidateMainWallPos, mainAxeWallSide)
+                || !isClimbableFace(client, candidateOffhandWallPos, offhandAxeWallSide)) {
             return false;
         }
 
@@ -355,18 +797,17 @@ public class FarClimbClient implements ClientModInitializer {
         }
 
         strideStartPosition = attachmentPosition;
-        strideStartContactPoint = attachmentContactPoint;
+        strideStartMainContactPoint = mainAxeContactPoint;
+        strideStartOffhandContactPoint = offhandAxeContactPoint;
         strideTargetPosition = candidatePosition;
-        strideTargetContactPoint = candidateContactPoint;
+        strideTargetMainContactPoint = candidateMainContact;
+        strideTargetOffhandContactPoint = candidateOffhandContact;
         strideElapsedTicks = 0;
         strideDurationTicks = randomIntInclusive(
                 MIN_STRIDE_DURATION_TICKS,
                 MAX_STRIDE_DURATION_TICKS
         );
 
-        // Alternate the visible body lean for every new pull. Vertical pulls
-        // receive the clearest accent, traverses slightly less, and careful
-        // downward steps the least.
         strideSwayDirection *= -1;
         if (movement.y > 0.0001D) {
             strideSwayAmplitudeDegrees = UP_STRIDE_SWAY_DEGREES;
@@ -379,7 +820,7 @@ public class FarClimbClient implements ClientModInitializer {
     }
 
     private static void advanceStride(MinecraftClient client) {
-        if (!isStrideActive() || attachmentWallSide == null) {
+        if (!isStrideActive() || !hasBothAxesAttached()) {
             resetStrideState();
             return;
         }
@@ -390,28 +831,44 @@ public class FarClimbClient implements ClientModInitializer {
         double easedProgress = smoothStep(progress);
 
         Vec3d nextPosition = strideStartPosition.lerp(strideTargetPosition, easedProgress);
-        Vec3d nextContactPoint = strideStartContactPoint.lerp(strideTargetContactPoint, easedProgress);
-        BlockPos nextWallPos = getWallBlockAtContact(nextContactPoint, attachmentWallSide);
+        Vec3d nextMainContact = strideStartMainContactPoint.lerp(
+                strideTargetMainContactPoint,
+                easedProgress
+        );
+        Vec3d nextOffhandContact = strideStartOffhandContactPoint.lerp(
+                strideTargetOffhandContactPoint,
+                easedProgress
+        );
+        BlockPos nextMainWallPos = getWallBlockAtContact(nextMainContact, mainAxeWallSide);
+        BlockPos nextOffhandWallPos = getWallBlockAtContact(nextOffhandContact, offhandAxeWallSide);
 
-        // Recheck every interpolated point so a stride cannot carry the player
-        // through a newly created obstruction or across a missing wall face.
-        if (!isClimbableFace(client, nextWallPos, attachmentWallSide)
+        if (!isClimbableFace(client, nextMainWallPos, mainAxeWallSide)
+                || !isClimbableFace(client, nextOffhandWallPos, offhandAxeWallSide)
                 || !isDestinationClear(client, nextPosition)) {
             resetStrideState();
             return;
         }
 
         attachmentPosition = nextPosition;
-        attachmentContactPoint = nextContactPoint;
-        attachmentWallPos = nextWallPos.toImmutable();
+        mainAxeContactPoint = nextMainContact;
+        mainAxeWallPos = nextMainWallPos.toImmutable();
+        offhandAxeContactPoint = nextOffhandContact;
+        offhandAxeWallPos = nextOffhandWallPos.toImmutable();
+        refreshSharedAttachmentReference();
 
         if (progress >= 1.0D) {
             attachmentPosition = strideTargetPosition;
-            attachmentContactPoint = strideTargetContactPoint;
-            attachmentWallPos = getWallBlockAtContact(
-                    strideTargetContactPoint,
-                    attachmentWallSide
+            mainAxeContactPoint = strideTargetMainContactPoint;
+            mainAxeWallPos = getWallBlockAtContact(
+                    strideTargetMainContactPoint,
+                    mainAxeWallSide
             ).toImmutable();
+            offhandAxeContactPoint = strideTargetOffhandContactPoint;
+            offhandAxeWallPos = getWallBlockAtContact(
+                    strideTargetOffhandContactPoint,
+                    offhandAxeWallSide
+            ).toImmutable();
+            refreshSharedAttachmentReference();
             resetStrideState();
         }
     }
@@ -430,38 +887,40 @@ public class FarClimbClient implements ClientModInitializer {
     }
 
     private static double smoothStep(double progress) {
-        // Smoothstep: ease in, move fastest in the middle, then ease out.
         return progress * progress * (3.0D - 2.0D * progress);
     }
 
     private static boolean isStrideActive() {
         return strideStartPosition != null
-                && strideStartContactPoint != null
+                && strideStartMainContactPoint != null
+                && strideStartOffhandContactPoint != null
                 && strideTargetPosition != null
-                && strideTargetContactPoint != null
+                && strideTargetMainContactPoint != null
+                && strideTargetOffhandContactPoint != null
                 && strideDurationTicks > 0;
     }
 
     private static void resetStrideState() {
         strideStartPosition = null;
-        strideStartContactPoint = null;
+        strideStartMainContactPoint = null;
+        strideStartOffhandContactPoint = null;
         strideTargetPosition = null;
-        strideTargetContactPoint = null;
+        strideTargetMainContactPoint = null;
+        strideTargetOffhandContactPoint = null;
         strideElapsedTicks = 0;
         strideDurationTicks = 0;
         strideSwayAmplitudeDegrees = 0.0F;
     }
 
     private static boolean tryBeginMantle(MinecraftClient client) {
-        if (attachmentPosition == null
+        if (!hasBothAxesAttached()
+                || attachmentPosition == null
                 || attachmentContactPoint == null
                 || attachmentWallPos == null
                 || attachmentWallSide == null) {
             return false;
         }
 
-        // Do not mantle from the middle or bottom of a block. The axes need to
-        // have reached the upper portion of the final wall block first.
         double contactProgressThroughBlock = attachmentContactPoint.y - attachmentWallPos.getY();
         if (contactProgressThroughBlock < MANTLE_EDGE_PROGRESS_REQUIRED) {
             return false;
@@ -476,7 +935,11 @@ public class FarClimbClient implements ClientModInitializer {
             return false;
         }
 
-        Vec3d targetPosition = getMantleTargetPosition(attachmentPosition, attachmentWallPos, attachmentWallSide);
+        Vec3d targetPosition = getMantleTargetPosition(
+                attachmentPosition,
+                attachmentWallPos,
+                attachmentWallSide
+        );
         double ledgeTopY = attachmentWallPos.getY() + 1.0D;
         Vec3d liftPosition = new Vec3d(
                 attachmentPosition.x,
@@ -508,9 +971,6 @@ public class FarClimbClient implements ClientModInitializer {
         double targetX = currentPosition.x;
         double targetZ = currentPosition.z;
 
-        // End with the player's centre barely inside the ledge. This keeps most of
-        // the player near the outside edge while still leaving enough support to stand.
-        // Along the wall, preserve the player's position where possible.
         if (wallSide.getAxis() == Direction.Axis.X) {
             targetX = wallSide == Direction.WEST
                     ? ledgePos.getX() + MANTLE_EDGE_INSET
@@ -556,7 +1016,7 @@ public class FarClimbClient implements ClientModInitializer {
         }
 
         if (!isDestinationClear(client, nextPosition)) {
-            detach(client, "Mantle cancelled - path blocked", true, true);
+            detachCompletely(client, "Mantle cancelled - path blocked");
             return;
         }
 
@@ -633,7 +1093,7 @@ public class FarClimbClient implements ClientModInitializer {
     }
 
     private static void holdPlayerAtAttachment(MinecraftClient client) {
-        if (attachmentPosition == null) {
+        if (attachmentPosition == null || !hasAnyAxeAttached()) {
             return;
         }
 
@@ -647,32 +1107,43 @@ public class FarClimbClient implements ClientModInitializer {
         client.player.fallDistance = 0.0F;
     }
 
-    private static void detach(
-            MinecraftClient client,
-            String message,
-            boolean mainHandAxe,
-            boolean offhandAxe
-    ) {
-        client.player.setNoGravity(previousNoGravity);
-        client.player.setVelocity(0.0D, 0.0D, 0.0D);
-        client.player.fallDistance = 0.0F;
+    private static void detachCompletely(MinecraftClient client, String message) {
+        boolean restoreNoGravity = previousNoGravity;
 
         resetAttachmentState();
 
-        BlockHitResult climbableWall = mainHandAxe && offhandAxe
-                ? getClimbableWallHit(client)
-                : null;
-        previousClimbingState = getClimbingState(
-                mainHandAxe,
-                offhandAxe,
-                climbableWall != null
-        );
-
+        client.player.setNoGravity(restoreNoGravity);
+        client.player.setVelocity(0.0D, 0.0D, 0.0D);
+        client.player.fallDistance = 0.0F;
+        syncPreviousClimbingState(client);
         client.player.sendMessage(Text.literal(message), true);
     }
 
+    private static void syncPreviousClimbingState(MinecraftClient client) {
+        boolean mainHandAxeEquipped = client.player.getMainHandStack().isOf(ModItems.CLIMBING_AXE);
+        boolean offhandAxeEquipped = client.player.getOffHandStack().isOf(ModItems.CLIMBING_AXE);
+        BlockHitResult climbableWall = mainHandAxeEquipped || offhandAxeEquipped
+                ? getClimbableWallHit(client)
+                : null;
+
+        previousClimbingState = getClimbingState(
+                mainHandAxeEquipped,
+                offhandAxeEquipped,
+                climbableWall != null
+        );
+    }
+
     private static void resetAttachmentState() {
-        attached = false;
+        mainAxeAttached = false;
+        mainAxeContactPoint = null;
+        mainAxeWallPos = null;
+        mainAxeWallSide = null;
+
+        offhandAxeAttached = false;
+        offhandAxeContactPoint = null;
+        offhandAxeWallPos = null;
+        offhandAxeWallSide = null;
+
         previousNoGravity = false;
         attachmentPosition = null;
         attachmentContactPoint = null;
@@ -680,12 +1151,8 @@ public class FarClimbClient implements ClientModInitializer {
         attachmentWallSide = null;
         resetStrideState();
         resetMantleState();
-    }
-
-    private static boolean isAttachmentSurfaceStillValid(MinecraftClient client) {
-        return attachmentWallPos != null
-                && attachmentWallSide != null
-                && isClimbableFace(client, attachmentWallPos, attachmentWallSide);
+        resetOneAxeHangState();
+        resetTwoAxeStabilization();
     }
 
     private static boolean isClimbableFace(
@@ -693,6 +1160,10 @@ public class FarClimbClient implements ClientModInitializer {
             BlockPos blockPos,
             Direction wallSide
     ) {
+        if (blockPos == null || wallSide == null) {
+            return false;
+        }
+
         BlockState blockState = client.world.getBlockState(blockPos);
 
         if (blockState.isAir() || !blockState.getFluidState().isEmpty()) {
@@ -715,24 +1186,45 @@ public class FarClimbClient implements ClientModInitializer {
         }
 
         if (mainHandAxe) {
-            return 1;
+            return climbableWallDetected ? 6 : 1;
         }
 
         if (offhandAxe) {
-            return 2;
+            return climbableWallDetected ? 7 : 2;
         }
 
         return 0;
     }
 
-    private static Text getStatusMessage(int climbingState) {
+    private static Text getStatusMessage(MinecraftClient client, int climbingState) {
+        String mainAxeName = getAxeDisplayName(client, true);
+        String offhandAxeName = getAxeDisplayName(client, false);
+        String mainAxeClick = getClickNameForHand(client, true);
+        String offhandAxeClick = getClickNameForHand(client, false);
+
         return switch (climbingState) {
-            case 1 -> Text.literal("Main-hand climbing axe detected");
-            case 2 -> Text.literal("Offhand climbing axe detected");
-            case 3 -> Text.literal("Two climbing axes detected - no climbable wall in reach");
-            case 4 -> Text.literal("Climbable wall detected - hold Sneak to attach");
+            case 1 -> Text.literal(mainAxeName + " climbing axe equipped - no wall in reach");
+            case 2 -> Text.literal(offhandAxeName + " climbing axe equipped - no wall in reach");
+            case 3 -> Text.literal("Two climbing axes equipped - no wall in reach");
+            case 4 -> Text.literal("Wall in reach - left click and right click to plant axes");
+            case 6 -> Text.literal("Wall in reach - " + mainAxeClick
+                    + " to plant " + mainAxeName.toLowerCase() + " axe");
+            case 7 -> Text.literal("Wall in reach - " + offhandAxeClick
+                    + " to plant " + offhandAxeName.toLowerCase() + " axe");
             default -> Text.literal("Climbing axes not equipped");
         };
+    }
+
+    private static String getAxeDisplayName(MinecraftClient client, boolean mainHand) {
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean handIsLeftSide = mainHand == mainHandIsLeftSide;
+        return handIsLeftSide ? "Left-side" : "Right-side";
+    }
+
+    private static String getClickNameForHand(MinecraftClient client, boolean mainHand) {
+        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
+        boolean handIsLeftSide = mainHand == mainHandIsLeftSide;
+        return handIsLeftSide ? "left click" : "right click";
     }
 
     private static BlockHitResult getClimbableWallHit(MinecraftClient client) {
