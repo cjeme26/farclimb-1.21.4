@@ -1,7 +1,7 @@
 # FarClimb
 
-A Fabric 1.21.4 mountaineering mod focused on deliberate two-axe climbing.
+A Fabric 1.21.4 mountaineering mod built around deliberate two-axe climbing.
 
-## Current milestone
+Current milestone: **4.0 — wall attachment**
 
-Milestone 3.0 detects whether a full, horizontal climbing surface is within short reach while the player has a Climbing Axe in both hands. It does not yet attach the player or change movement.
+Equip a Climbing Axe in each hand, face a climbable wall at close range, and hold the normal Sneak key to attach. Release Sneak, remove an axe, or lose the supporting wall to detach.
