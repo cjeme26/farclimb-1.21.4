@@ -23,5 +23,11 @@
 		"minecraft": "~1.21.4",
 		"java": ">=21",
 		"fabric-api": "*"
-	}
+	},
+	"mixins": [
+		{
+			"config": "farclimb.client.mixins.json",
+			"environment": "client"
+		}
+	]
 }
