@@ -1,41 +1,41 @@
 # FarClimb
 
-A Fabric 1.21.4 mountaineering mod focused on deliberate two-axe climbing.
+FarClimb is a Fabric mod for Minecraft 1.21.4 that adds deliberate free-climbing with two climbing axes.
 
-## Current milestone: 6.3.1
+## Alpha features
 
-- Climbing Axe item using the vanilla iron pickaxe appearance
-- Main-hand and offhand equipment detection
-- Climbable wall detection
-- Independent left-side and right-side axe attachment
-- Unified first-person strike-to-plant animations tied to saved wall contacts
-- Third-person arms aimed toward the saved axe contacts
-- Corrected sleeve, jacket, and trouser overlay alignment
-- Wall-facing look restrictions while axes are planted
-- Lowered loose arm and pickaxe during one-axe hanging
-- Third-person torso lean and bent-leg climbing pose
-- Alternating visible axe repositioning during climbing strides
-- One-axe pendulum hanging with body displacement and camera lean
-- Collision-aware sway near corners and obstructions
-- Smooth stabilization when the second axe reconnects
-- Two axes enable smooth W/A/S/D climbing
-- Eased climbing strides with larger upward pulls
+- Independent left- and right-side axe attachment
+- Smooth wall climbing with W/A/S/D
+- One-axe hanging and pendulum sway
+- First-person climbing motion
+- Third-person climbing poses
 - Top-edge mantling
-- First-person climbing sway
+- A FarClimb Creative inventory tab
+- A survival crafting recipe for the Climbing Axe
 
-See `FARCLIMB_MILESTONE_6_3_1.md` for testing details.
+## Controls
 
-### Milestone 6.3.1 compatibility fix
+- Left click: use the visible left axe
+- Right click: use the visible right axe
+- W: climb up
+- S: climb down
+- A/D: move sideways
 
-This archive replaces the unsupported `Direction.asRotation()` call with an
-explicit direction-to-yaw conversion for Yarn 1.21.4.
+Both axes must be attached to climb. One attached axe lets the player hang and sway.
 
-## Milestone 6.3.2
+## Known alpha limitations
 
-Polishes the third-person body model and wall-facing camera limits. Skin overlays now follow complete limb transforms, torso/leg seams are reduced, and mouse input stops cleanly at the allowed climbing look angle without repeated snapping.
+- The temporary Climbing Axe uses the vanilla iron pickaxe model.
+- Third-person planted-axe positioning is still being refined.
+- Some skin overlay poses may not align perfectly while climbing.
 
-## Milestone 6.3.2a
+## Requirements
 
-Outer skin layers now preserve their own default offsets while inheriting the final
-movement of the matching base limb. This is a rendering-only correction; climbing,
-camera limits, attachment, mantling and axe contact behavior are unchanged.
+- Minecraft 1.21.4
+- Fabric Loader
+- Fabric API
+- Java 21
+
+## License
+
+CC0-1.0

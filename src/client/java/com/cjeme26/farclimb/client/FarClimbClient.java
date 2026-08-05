@@ -301,7 +301,6 @@ public class FarClimbClient implements ClientModInitializer {
 
             if (currentClimbingState != previousClimbingState) {
                 previousClimbingState = currentClimbingState;
-                client.player.sendMessage(getStatusMessage(client, currentClimbingState), true);
             }
             return;
         }
@@ -535,17 +534,6 @@ public class FarClimbClient implements ClientModInitializer {
         holdPlayerAtAttachment(client);
         beginAxeStrike(mainHand);
 
-        if (hasBothAxesAttached()) {
-            client.player.sendMessage(
-                    Text.literal("Both axes attached - use W/A/S/D to climb"),
-                    true
-            );
-        } else {
-            client.player.sendMessage(
-                    Text.literal(axeName + " axe attached - hanging from one axe"),
-                    true
-            );
-        }
     }
 
     private static void releaseAxe(MinecraftClient client, boolean mainHand, String message) {
@@ -572,10 +560,6 @@ public class FarClimbClient implements ClientModInitializer {
         beginOneAxeHang();
         holdPlayerAtAttachment(client);
 
-        String support = mainAxeAttached
-                ? getAxeDisplayName(client, true).toLowerCase() + " axe"
-                : getAxeDisplayName(client, false).toLowerCase() + " axe";
-        client.player.sendMessage(Text.literal(message + " - hanging from " + support), true);
     }
 
     private static void validateAttachedSurfaces(MinecraftClient client) {
@@ -1434,7 +1418,6 @@ public class FarClimbClient implements ClientModInitializer {
         mantleElapsedTicks = 0;
         resetStrideState();
 
-        client.player.sendMessage(Text.literal("Pulling over ledge..."), true);
         return true;
     }
 
@@ -1513,7 +1496,6 @@ public class FarClimbClient implements ClientModInitializer {
         client.player.setPosition(finalPosition.x, finalPosition.y, finalPosition.z);
         client.player.fallDistance = 0.0F;
         previousClimbingState = -1;
-        client.player.sendMessage(Text.literal("Mantled onto ledge"), true);
     }
 
     private static boolean isMantleSurfaceStillValid(MinecraftClient client) {
@@ -1591,7 +1573,6 @@ public class FarClimbClient implements ClientModInitializer {
         client.player.setVelocity(0.0D, 0.0D, 0.0D);
         client.player.fallDistance = 0.0F;
         syncPreviousClimbingState(client);
-        client.player.sendMessage(Text.literal(message), true);
     }
 
     private static void syncPreviousClimbingState(MinecraftClient client) {
