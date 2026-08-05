@@ -67,19 +67,20 @@ public final class TemporaryAnchoredAxeModel {
         ModelData data = new ModelData();
         ModelPartData root = data.getRoot();
 
-        // The handle starts just behind the head and extends downward. All
-        // dimensions are model pixels; ModelPart renders them at 1/16 block.
+        // The handle extends downward while staying close to the outer wall
+        // surface. Local +Z is outward from the wall, so only a small positive
+        // depth is used here.
         root.addChild(
                 "handle",
                 ModelPartBuilder.create()
                         .uv(0, 0)
                         .cuboid(
-                                -0.75F,
+                                -0.70F,
                                 2.4F,
-                                2.35F,
-                                1.5F,
+                                0.35F,
+                                1.4F,
                                 11.5F,
-                                1.5F,
+                                1.0F,
                                 Dilation.NONE
                         ),
                 ModelTransform.NONE
@@ -92,8 +93,9 @@ public final class TemporaryAnchoredAxeModel {
         ModelData data = new ModelData();
         ModelPartData root = data.getRoot();
 
-        // A short spike crosses the wall plane. Its innermost end is the exact
-        // local origin, so the visible model cannot drift away from its anchor.
+        // The planted contact is local Z = 0. The spike extends mostly along
+        // negative Z, which is into the wall, while only a tiny amount remains
+        // outside the surface.
         root.addChild(
                 "pick",
                 ModelPartBuilder.create()
@@ -101,10 +103,10 @@ public final class TemporaryAnchoredAxeModel {
                         .cuboid(
                                 -0.65F,
                                 -0.65F,
-                                -0.70F,
+                                -3.55F,
                                 1.3F,
                                 1.3F,
-                                4.2F,
+                                3.95F,
                                 Dilation.NONE
                         ),
                 ModelTransform.NONE
@@ -118,10 +120,10 @@ public final class TemporaryAnchoredAxeModel {
                         .cuboid(
                                 -4.6F,
                                 -1.0F,
-                                2.55F,
+                                0.15F,
                                 9.2F,
                                 2.0F,
-                                2.0F,
+                                1.45F,
                                 Dilation.NONE
                         ),
                 ModelTransform.NONE
@@ -136,10 +138,10 @@ public final class TemporaryAnchoredAxeModel {
                         .cuboid(
                                 -1.25F,
                                 0.35F,
-                                2.45F,
+                                0.20F,
                                 2.5F,
                                 2.0F,
-                                2.2F,
+                                1.35F,
                                 Dilation.NONE
                         ),
                 ModelTransform.NONE

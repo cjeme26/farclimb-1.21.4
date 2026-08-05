@@ -39,12 +39,3 @@ Polishes the third-person body model and wall-facing camera limits. Skin overlay
 Outer skin layers now preserve their own default offsets while inheriting the final
 movement of the matching base limb. This is a rendering-only correction; climbing,
 camera limits, attachment, mantling and axe contact behavior are unchanged.
-
-
-## Milestone 6.3.3
-
-Third-person planted pickaxes are now rendered at their saved wall contacts instead of being carried by the rotating hand model. Visual contacts are kept inside block-face margins to reduce edge and corner floating. See `FARCLIMB_MILESTONE_6_3_3.md`.
-
-## Milestone 6.3.3b
-
-World-anchored pickaxes now use separately calibrated left/right poses and newly planted contacts are constrained to reachable shoulder-relative positions.

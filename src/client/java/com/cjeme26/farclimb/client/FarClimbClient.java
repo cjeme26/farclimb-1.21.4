@@ -1,6 +1,5 @@
 package com.cjeme26.farclimb.client;
 
-import com.cjeme26.farclimb.client.render.AnchoredAxeRenderer;
 import com.cjeme26.farclimb.item.ModItems;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -53,17 +52,6 @@ public class FarClimbClient implements ClientModInitializer {
     private static final double PLAYER_EDGE_MARGIN = 0.31D;
 
     private static final double WALL_FACE_EPSILON = 0.01D;
-
-    // Newly planted axes are constrained to a believable reach window around
-    // the corresponding shoulder. The player can still aim within that window,
-    // but a high crosshair hit can no longer place a world-anchored axe far
-    // above the body after a drop or reattachment.
-    private static final double AXE_CONTACT_SHOULDER_HEIGHT = 1.45D;
-    private static final double AXE_CONTACT_SIDE_BIAS = 0.23D;
-    private static final double AXE_CONTACT_SIDE_REACH = 0.24D;
-    private static final double AXE_CONTACT_DOWN_REACH = 0.22D;
-    private static final double AXE_CONTACT_UP_REACH = 0.42D;
-    private static final double AXE_CONTACT_FACE_INSET = 0.18D;
 
     // Stationary hanging uses a slow, broad pendulum motion. Active climbing
     // uses a separate alternating pulse tied to each stride.
@@ -191,7 +179,6 @@ public class FarClimbClient implements ClientModInitializer {
     @Override
     public void onInitializeClient() {
         ClientTickEvents.END_CLIENT_TICK.register(FarClimbClient::tickClimbing);
-        AnchoredAxeRenderer.initialize();
 
         // Mouse buttons are mapped to the hands as they appear on screen:
         // left click controls the visible left-side axe and right click controls
@@ -523,20 +510,14 @@ public class FarClimbClient implements ClientModInitializer {
             attachmentWallSide = wallHit.getSide();
         }
 
-        Vec3d reachableContact = getReachLimitedAxeContact(
-                client,
-                wallHit,
-                mainHand
-        );
-
         if (mainHand) {
             mainAxeAttached = true;
-            mainAxeContactPoint = reachableContact;
+            mainAxeContactPoint = wallHit.getPos();
             mainAxeWallPos = wallHit.getBlockPos().toImmutable();
             mainAxeWallSide = wallHit.getSide();
         } else {
             offhandAxeAttached = true;
-            offhandAxeContactPoint = reachableContact;
+            offhandAxeContactPoint = wallHit.getPos();
             offhandAxeWallPos = wallHit.getBlockPos().toImmutable();
             offhandAxeWallSide = wallHit.getSide();
         }
@@ -711,14 +692,6 @@ public class FarClimbClient implements ClientModInitializer {
         return hand == Hand.MAIN_HAND ? mainAxeAttached : offhandAxeAttached;
     }
 
-    /**
-     * Rendering systems use this to stop drawing wall-owned axes as soon as a
-     * mantle begins. The gameplay attachment state remains alive until the
-     * committed mantle movement finishes.
-     */
-    public static boolean isMantling() {
-        return mantling;
-    }
 
 
     /**
@@ -749,9 +722,7 @@ public class FarClimbClient implements ClientModInitializer {
     }
 
     /**
-     * Returns the visual wall contact for the axe on the requested body side.
-     * The gameplay contact remains untouched; only rendering is clamped inward
-     * from block edges so an embedded axe cannot appear to float in empty air.
+     * Returns the saved wall contact for the axe on the requested visible side.
      */
     public static Vec3d getVisibleSideAxeContactPoint(boolean leftSide) {
         MinecraftClient client = MinecraftClient.getInstance();
@@ -761,189 +732,7 @@ public class FarClimbClient implements ClientModInitializer {
 
         boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
         boolean mainHand = leftSide == mainHandIsLeftSide;
-        Vec3d contact = mainHand ? mainAxeContactPoint : offhandAxeContactPoint;
-        BlockPos wallPos = mainHand ? mainAxeWallPos : offhandAxeWallPos;
-        Direction wallSide = mainHand ? mainAxeWallSide : offhandAxeWallSide;
-        return clampAxeContactToBlockFace(contact, wallPos, wallSide);
-    }
-
-    /**
-     * Returns the planted wall face for the axe shown on the requested side.
-     */
-    public static Direction getVisibleSideAxeWallSide(boolean leftSide) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) {
-            return null;
-        }
-
-        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
-        boolean mainHand = leftSide == mainHandIsLeftSide;
-        return mainHand ? mainAxeWallSide : offhandAxeWallSide;
-    }
-
-    /**
-     * Returns the supporting block for the axe shown on the requested side.
-     */
-    public static BlockPos getVisibleSideAxeWallPos(boolean leftSide) {
-        MinecraftClient client = MinecraftClient.getInstance();
-        if (client.player == null) {
-            return null;
-        }
-
-        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
-        boolean mainHand = leftSide == mainHandIsLeftSide;
-        return mainHand ? mainAxeWallPos : offhandAxeWallPos;
-    }
-
-    /**
-     * The wall model replaces the normal held-item render only after the strike
-     * reaches the contact point. Before that moment the vanilla hand still owns
-     * the visible pickaxe, making the hand-to-wall transition continuous.
-     */
-    public static boolean shouldHideVanillaThirdPersonAxe(
-            int renderedEntityId,
-            boolean leftSide
-    ) {
-        if (!shouldApplyThirdPersonClimbingPose(renderedEntityId)
-                || !isVisibleSideAxeAttached(leftSide)) {
-            return false;
-        }
-
-        return getVisibleSideAxePlantProgress(leftSide, 1.0F) >= 0.98F;
-    }
-
-    /**
-     * Constrains a new axe strike to the reachable area around the matching
-     * shoulder. The raycast still chooses the wall/block and influences the
-     * exact point, but cannot place the axe implausibly high or across the
-     * opposite side of the body.
-     */
-    private static Vec3d getReachLimitedAxeContact(
-            MinecraftClient client,
-            BlockHitResult wallHit,
-            boolean mainHand
-    ) {
-        Vec3d rawContact = wallHit.getPos();
-        BlockPos wallPos = wallHit.getBlockPos();
-        Direction wallSide = wallHit.getSide();
-
-        boolean mainHandIsLeftSide = client.player.getMainArm() == Arm.LEFT;
-        boolean leftSide = mainHand == mainHandIsLeftSide;
-
-        // Right vector from the climber's perspective while facing into the
-        // wall. SOUTH face -> east, EAST face -> north, and so on.
-        Vec3d wallRight = new Vec3d(
-                wallSide.getOffsetZ(),
-                0.0D,
-                -wallSide.getOffsetX()
-        );
-
-        Vec3d shoulderCenter = client.player.getPos()
-                .add(0.0D, AXE_CONTACT_SHOULDER_HEIGHT, 0.0D)
-                .add(wallRight.multiply(
-                        leftSide ? -AXE_CONTACT_SIDE_BIAS : AXE_CONTACT_SIDE_BIAS
-                ));
-
-        double shoulderAlongWall = shoulderCenter.dotProduct(wallRight);
-        double rawAlongWall = rawContact.dotProduct(wallRight);
-        double reachableAlongWall = clamp(
-                rawAlongWall,
-                shoulderAlongWall - AXE_CONTACT_SIDE_REACH,
-                shoulderAlongWall + AXE_CONTACT_SIDE_REACH
-        );
-
-        double shoulderY = client.player.getY() + AXE_CONTACT_SHOULDER_HEIGHT;
-        double reachableY = clamp(
-                rawContact.y,
-                shoulderY - AXE_CONTACT_DOWN_REACH,
-                shoulderY + AXE_CONTACT_UP_REACH
-        );
-
-        // Start at the centre of the selected block face, then move only along
-        // the wall tangent. This keeps the contact exactly on the chosen face.
-        Vec3d faceCenter = new Vec3d(
-                wallPos.getX() + 0.5D + wallSide.getOffsetX() * 0.5D,
-                reachableY,
-                wallPos.getZ() + 0.5D + wallSide.getOffsetZ() * 0.5D
-        );
-        double faceCenterAlongWall = faceCenter.dotProduct(wallRight);
-        Vec3d reachableContact = faceCenter.add(wallRight.multiply(
-                reachableAlongWall - faceCenterAlongWall
-        ));
-
-        // The block-face inset is applied here as well as in the visual getter
-        // so gameplay contacts and arm targets do not live beyond an edge.
-        double minimumInset = AXE_CONTACT_FACE_INSET;
-        double maximumInset = 1.0D - AXE_CONTACT_FACE_INSET;
-        double x = reachableContact.x;
-        double z = reachableContact.z;
-
-        if (wallSide.getAxis() == Direction.Axis.X) {
-            z = clamp(
-                    z,
-                    wallPos.getZ() + minimumInset,
-                    wallPos.getZ() + maximumInset
-            );
-        } else if (wallSide.getAxis() == Direction.Axis.Z) {
-            x = clamp(
-                    x,
-                    wallPos.getX() + minimumInset,
-                    wallPos.getX() + maximumInset
-            );
-        }
-
-        return new Vec3d(x, reachableY, z);
-    }
-
-    private static Vec3d clampAxeContactToBlockFace(
-            Vec3d contact,
-            BlockPos wallPos,
-            Direction wallSide
-    ) {
-        if (contact == null || wallPos == null || wallSide == null) {
-            return contact;
-        }
-
-        // Keep the head comfortably inside the visible square of the block.
-        // This is a rendering-only correction and never changes attachment or
-        // movement collision data.
-        double minimumInset = 0.18D;
-        double maximumInset = 0.82D;
-        double x = contact.x;
-        double y = clamp(
-                contact.y,
-                wallPos.getY() + minimumInset,
-                wallPos.getY() + maximumInset
-        );
-        double z = contact.z;
-
-        if (wallSide.getAxis() == Direction.Axis.X) {
-            x = wallSide == Direction.EAST
-                    ? wallPos.getX() + 1.0D
-                    : wallPos.getX();
-            z = clamp(
-                    contact.z,
-                    wallPos.getZ() + minimumInset,
-                    wallPos.getZ() + maximumInset
-            );
-        } else if (wallSide.getAxis() == Direction.Axis.Z) {
-            z = wallSide == Direction.SOUTH
-                    ? wallPos.getZ() + 1.0D
-                    : wallPos.getZ();
-            x = clamp(
-                    contact.x,
-                    wallPos.getX() + minimumInset,
-                    wallPos.getX() + maximumInset
-            );
-        }
-
-        // Pull the item a hair outside the surface to avoid z-fighting while
-        // still making the pickaxe head look buried in the block.
-        return new Vec3d(x, y, z).add(
-                wallSide.getOffsetX() * 0.012D,
-                0.0D,
-                wallSide.getOffsetZ() * 0.012D
-        );
+        return mainHand ? mainAxeContactPoint : offhandAxeContactPoint;
     }
 
     /**
