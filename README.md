@@ -9,9 +9,7 @@ GitHub is used for source code and development.
 Development files and source code on GitHub may be incomplete, unstable, or changed without notice. 
 
 #### Requirements
-Minecraft 1.21.4
-Fabric Loader
-Fabric API
+Minecraft 1.21.4, Fabric Loader and Fabric API
 
 #### What's included?
 Climb walls using independent left and right climbing axes.
