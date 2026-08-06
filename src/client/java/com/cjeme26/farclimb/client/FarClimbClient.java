@@ -40,8 +40,8 @@ public class FarClimbClient implements ClientModInitializer {
     private static final int MIN_STRIDE_DURATION_TICKS = 7;
     private static final int MAX_STRIDE_DURATION_TICKS = 9;
 
-    // Mantling is deliberately split into two eased phases. The first raises
-    // the player's feet above the ledge; the second pulls them onto the top.
+    // Mantling is split into two eased phases. The first raises
+    // the player's feet above the ledge and the second one pulls them onto the top.
     private static final int MANTLE_LIFT_DURATION_TICKS = 24;
     private static final int MANTLE_PULL_DURATION_TICKS = 6;
     private static final double MANTLE_TOP_CLEARANCE = 0.03D;
@@ -53,8 +53,8 @@ public class FarClimbClient implements ClientModInitializer {
 
     private static final double WALL_FACE_EPSILON = 0.01D;
 
-    // Stationary hanging uses a slow, broad pendulum motion. Active climbing
-    // uses a separate alternating pulse tied to each stride.
+    // Stationary hanging uses a slow broad pendulum motion. Active climbing
+    // Active climbing uses a separate alternating pulse tied to each stride.
     private static final float STATIONARY_SWAY_DEGREES = 1.55F;
     private static final double STATIONARY_SWAY_SPEED = 0.075D;
     private static final float UP_STRIDE_SWAY_DEGREES = 3.00F;
@@ -65,8 +65,8 @@ public class FarClimbClient implements ClientModInitializer {
     private static final float SWAY_RETURN_RESPONSE = 0.18F;
 
     // One-axe hanging treats the attached axe as a fixed pivot. The player's
-    // body moves in a slow arc below it while the camera leans less than the
-    // body displacement, suggesting that the lower body swings farther.
+    // The player's body moves in a slow arc below it while the camera leans less than the
+    // less than the body displacement, suggesting that the lower body swings farther.
     private static final double ONE_AXE_SWAY_SPEED = 0.065D;
     private static final double ONE_AXE_SWAY_DISTANCE = 0.25D;
     private static final double ONE_AXE_HAND_BIAS = 0.06D;
