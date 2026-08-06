@@ -1,52 +1,40 @@
-# FarClimb License
-
+FarClimb License
 Version 1.0
-
 All rights reserved.
 
 This license governs the use of FarClimb, including its source code, compiled binaries, assets, documentation, and any other files contained within the project.
 
-#### 1. Ownership
-
+1. Ownership
 FarClimb and all associated source code, assets, documentation, and project files are the intellectual property of the author.
-
 No ownership or copyright is transferred by this license. All rights not expressly granted below are reserved.
 
-#### 2. Permitted Uses
-
+2. Permitted Uses
 You may:
-
 1. Use FarClimb in single-player worlds.
 2. Use FarClimb on multiplayer servers.
 3. Include the official, unmodified release of FarClimb in public or private modpacks.
 4. Create videos, livestreams, screenshots, and other content featuring FarClimb.
 5. View and study the publicly available source code for personal reference and educational purposes.
 
-#### 3. Restrictions
-
+3. Restrictions
 Without prior written permission from the author, you may not:
-
 1. Redistribute modified versions of FarClimb.
 2. Reupload FarClimb as a standalone download.
 3. Copy, reuse, adapt, or incorporate any portion of FarClimb's source code, assets, or documentation into another project.
 4. Distribute derivative works based on FarClimb.
 5. Remove or alter this license or any copyright notices.
 6. Claim FarClimb, its source code, assets, or any part of the project as your own work.
-
-#### 4. Distribution
+4. Distribution
 
 Official releases of FarClimb are distributed through the platforms designated by the author.
 
 Source code published on GitHub is provided for transparency and reference. The availability of the source code does not grant permission to copy, modify, redistribute, or incorporate it into other projects except where expressly permitted by this license.
 
-#### 5. Disclaimer
-
+5. Disclaimer
 FarClimb is provided "as is", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, and non-infringement.
-
 The author shall not be liable for any damages, losses, or other claims arising from the installation, use, or inability to use FarClimb.
 
-#### 6. Changes to This License
-
+6. Changes to This License
 The author reserves the right to update this license for future versions of FarClimb. Unless otherwise stated, each release remains subject to the license that accompanied that release.
 
 ---
